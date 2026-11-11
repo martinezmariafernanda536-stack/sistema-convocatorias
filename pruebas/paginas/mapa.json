@@ -1,0 +1,17 @@
+{
+ "https://www.uu.nl": "uu_inicio.html",
+ "https://www.uu.nl/robots.txt": "uu_robots.txt",
+ "https://www.uu.nl/en/education/scholarships": "uu_listado.html",
+ "https://www.uu.nl/en/scholarships/utrecht-excellence-scholarships": "uu_excellence.html",
+ "https://www.uu.nl/en/scholarships/holland-eu-grant": "uu_eu.html",
+ "https://www.uu.nl/en/scholarships/icetex-utrecht": "uu_icetex.html",
+ "https://www.uu.nl/en/scholarships/summer-2026": "uu_summer.html",
+ "https://kolumbien.ahk.de": "ahk_inicio.html",
+ "https://kolumbien.ahk.de/es/formacion/becas": "ahk_becas.html",
+ "https://kolumbien.ahk.de/es/formacion/becas/beca-formacion-dual-alemania": "ahk_dual.html",
+ "https://kolumbien.ahk.de/es/formacion/becas/beca-liderazgo-ejemplo": "ahk_liderazgo.html",
+ "https://web.icetex.gov.co/es/becas-exterior": "icetex_listado.html",
+ "https://www.uu.nl/en/research/global-challenges-call-for-proposals": "uu_subvencion.html",
+ "https://www.uu.nl/en/awards/sustainability-prize": "uu_premio.html",
+ "https://www.fondo-ejemplo.org/convocatorias/clima-2027": "ext_fondo.html"
+}

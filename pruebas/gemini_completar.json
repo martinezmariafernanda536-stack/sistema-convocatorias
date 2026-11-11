@@ -1,0 +1,14 @@
+{
+ "candidates": [
+  {
+   "content": {
+    "parts": [
+     {
+      "text": "{\"nombre\": \"Becas de Excelencia de Utrecht (Utrecht Excellence Scholarships)\", \"descripcion\": \"Becas para estudiantes de fuera de la UE que quieran cursar una maestría en la Universidad de Utrecht.\", \"objetivos\": \"General: atraer estudiantes talentosos de fuera de la UE.\", \"fecha_limite\": \"01/02/2027\", \"dirigida_a\": [\"Ciudadanos\"], \"poblaciones\": [], \"tematicas\": [\"Educación\", \"Inventada\"], \"ambito_geografico\": \"Global\", \"idiomas\": [\"Inglés\"], \"plan_marco\": \"No Aplica\", \"monto\": \"15000\", \"moneda\": \"EUR\", \"tipo_monto\": \"Por beneficiario o proyecto\", \"observaciones_monto\": \"Matrícula completa y EUR 15.000 al año para manutención.\", \"email\": \"scholarships@uu.nl\", \"evidencia_colombia\": \"including students from Latin America\"}"
+     }
+    ]
+   },
+   "finishReason": "STOP"
+  }
+ ]
+}
