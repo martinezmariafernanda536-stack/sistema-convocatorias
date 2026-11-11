@@ -1,0 +1,24 @@
+{
+ "candidates": [
+  {
+   "content": {
+    "parts": [
+     {
+      "text": "Aquí están:\n```json\n[\n {\n  \"nombre\": \"Pequeñas subvenciones para resiliencia climática 2027 (Climate Resilience Small Grants 2027)\",\n  \"oferente\": \"Fondo Ejemplo Foundation\",\n  \"tipo_actor\": \"Fundación / filantropía\",\n  \"pais_oferente\": \"Estados Unidos\",\n  \"modalidad\": \"Subvención\",\n  \"url_convocatoria\": \"https://www.fondo-ejemplo.org/convocatorias/clima-2027\",\n  \"url_sitio_oferente\": \"https://www.fondo-ejemplo.org\",\n  \"fecha_limite\": \"20/02/2027\",\n  \"dirigida_a\": \"Entidades sin animo de lucro (ESAL)\",\n  \"tematicas\": \"Cambio Climático, Medio ambiente inventado\",\n  \"monto\": \"30000\",\n  \"moneda\": \"USD\",\n  \"evidencia_colombia\": \"non-profit organisations in Colombia, Peru and Ecuador\",\n  \"descripcion\": \"Subvenciones de hasta USD 30.000 para organizaciones sin ánimo de lucro de Colombia, Perú y Ecuador que trabajen en resiliencia climática.\",\n  \"poblaciones\": \"Indigenas, Mujeres\",\n  \"ambito_geografico\": \"Regional\",\n  \"idiomas\": \"Inglés\",\n  \"plan_marco\": \"No Aplica\",\n  \"tipo_monto\": \"Por beneficiario o proyecto\",\n  \"observaciones_monto\": \"Hasta USD 30.000 por proyecto.\",\n  \"email\": \"\",\n  \"objetivos\": \"General: fortalecer la resiliencia climática de comunidades. Específicos: financiar proyectos locales de adaptación.\"\n },\n {\n  \"nombre\": \"Beca agregada\",\n  \"oferente\": \"X\",\n  \"modalidad\": \"Beca\",\n  \"url_convocatoria\": \"https://www.fundsforngos.org/beca-x\"\n },\n {\n  \"nombre\": \"Beca inventada\",\n  \"oferente\": \"Agencia Inventada\",\n  \"modalidad\": \"Beca\",\n  \"url_convocatoria\": \"https://www.agencia-inventada.gov/beca-2027\"\n },\n {\n  \"nombre\": \"Beca por ICETEX\",\n  \"oferente\": \"Gobierno Y\",\n  \"modalidad\": \"Beca\",\n  \"url_convocatoria\": \"https://web.icetex.gov.co/es/-/beca-y\"\n }\n]\n```"
+     }
+    ]
+   },
+   "finishReason": "STOP",
+   "groundingMetadata": {
+    "groundingChunks": [
+     {
+      "web": {
+       "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc",
+       "title": "fondo-ejemplo.org"
+      }
+     }
+    ]
+   }
+  }
+ ]
+}

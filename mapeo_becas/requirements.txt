@@ -1,0 +1,19 @@
+requests>=2.31
+beautifulsoup4>=4.12
+openpyxl>=3.1
+pandas>=2.0
+rapidfuzz>=3.0
+# Sistema, dashboard e informes
+streamlit>=1.50
+plotly>=5.20
+python-docx>=1.1
+matplotlib>=3.8
+# Opcional: PDF del informe en Windows con Word instalado
+# docx2pdf
+
+# Opcional: páginas que cargan el contenido con JavaScript
+# playwright>=1.40   (luego: python -m playwright install chromium)
+# Para correr las pruebas
+pytest>=7.0
+huggingface_hub>=0.26
+cryptography>=42
