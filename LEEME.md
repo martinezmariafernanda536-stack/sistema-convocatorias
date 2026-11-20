@@ -6,9 +6,10 @@ Este sistema reemplaza a Airtable. Sirve para tres cosas: **encontrar** convocat
 
 | Página | Para qué |
 |---|---|
+| **Inicio** | Lo que requiere atención hoy: por revisar, actores por crear, errores en la base, convocatorias que cierran pronto, lo último que llegó y la última búsqueda, con acceso directo a cada tarea |
 | **Dashboard e informes** | Indicadores, gráficos y el informe automático en Word y PDF |
 | **Bandeja de revisión** | Toda convocatoria nueva, mapeada o registrada a mano, se revisa aquí antes de entrar a la base |
-| **Base y calidad** | La base revisada: corregir pendientes de calidad, retirar duplicados, descargar todo en Excel e importar exports de Airtable |
+| **Base y calidad** | La base revisada. Muestra «qué falta por corregir» por tipo de pendiente; al marcar uno se filtra la tabla. Tiene filtros por año, modalidad y texto. Al marcar una fila se corrige; varias marcadas se retiran en bloque. También descarga todo en Excel e importa exports de Airtable |
 | **Mapeo automático** | Validar las fuentes y ejecutar la búsqueda de becas |
 | **Usuarios** | Crear usuarios y asignar perfiles (solo el administrador) |
 
@@ -42,7 +43,7 @@ La base es un archivo SQLite (`datos/convocatorias.db`) con las convocatorias, e
 
 ```bash
 pip install -r requirements.txt
-python -m pytest pruebas -q        # debe decir "94 passed"
+python -m pytest pruebas -q        # debe decir "100 passed"
 ```
 
 ## Puesta en marcha (una sola vez)
@@ -89,21 +90,22 @@ streamlit run app.py
 
 No hay que instalar nada ni ejecutar comandos.
 
-1. **GitHub, repositorio del código:** *New repository* → `sistema-convocatorias`, **Private**, con README. Luego *Add file → Upload files*: arrastra **todo el contenido** de la carpeta `mapeo_becas` y pulsa *Commit changes*. Incluye `datos/base_inicial.db`, que trae las 176 convocatorias sin usuarios, pero no `datos/convocatorias.db`.
+1. **GitHub, repositorio del código:** *New repository* → `sistema-convocatorias`, **Public** (puede ser público: no tiene claves; todas van en los Secrets de Streamlit), con README. Luego *Add file → Upload files*: arrastra **todo el contenido** de la carpeta `mapeo_becas` y pulsa *Commit changes*. Incluye `datos/base_inicial.db`, que trae las 176 convocatorias sin usuarios, pero no `datos/convocatorias.db`.
 2. **GitHub, repositorio de los datos:** *New repository* → `convocatorias-datos`, **Public**, con README. Déjalo así: la app lo llena sola.
-3. **GitHub, token:** *Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token*.
+3. **Gemini, clave (gratuita):** en aistudio.google.com, entra con una cuenta de Google → *Get API key* → *Create API key*. Copia la clave. Activa la búsqueda con Gemini en sitios oficiales que no están entre las fuentes, y el completado automático de campos. Sin ella, todo lo demás funciona.
+4. **GitHub, token:** *Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token*.
    - Vencimiento de 1 año.
    - *Only select repositories* → `convocatorias-datos`.
    - *Contents: Read and write*.
-4. **Streamlit:** share.streamlit.io → *Create app*.
+5. **Streamlit:** share.streamlit.io → *Create app*.
    - Repositorio `sistema-convocatorias`, rama `main`, archivo `app.py`.
    - En *Advanced settings*, Python 3.12.
    - Pulsa *Deploy*.
-5. **Al abrir la app** aparece **Configuración inicial del sistema** con el texto de los Secrets listo, incluidas las claves `USUARIOS_CLAVE` y `CLAVE_INSTALACION` ya generadas.
-   - Cópialo, completa `GITHUB_DATA_REPO` y `GITHUB_TOKEN` y pégalo en *Manage app → Settings → Secrets → Save*.
+6. **Al abrir la app** aparece **Configuración inicial del sistema** con el texto de los Secrets listo, incluidas las claves `USUARIOS_CLAVE` y `CLAVE_INSTALACION` ya generadas.
+   - Cópialo, completa `GITHUB_DATA_REPO`, `GITHUB_TOKEN` y `GEMINI_API_KEY` y pégalo en *Manage app → Settings → Secrets → Save*.
    - **Guarda las dos claves en un lugar seguro.**
-6. **La app se reinicia, copia la base inicial al repositorio de datos y pide crear el primer administrador** con la clave de instalación. Luego entregas los códigos de recuperación.
-7. **En Usuarios**, crea a los revisores.
+7. **La app se reinicia, copia la base inicial al repositorio de datos y pide crear el primer administrador** con la clave de instalación. Luego entregas los códigos de recuperación.
+8. **En Usuarios**, crea a los revisores.
 
 Si un administrador pierde el acceso y no tiene códigos, en la pantalla de ingreso está **«Soy administrador y perdí el acceso»**, que funciona con la clave de instalación.
 
@@ -159,6 +161,10 @@ Si el Space arranca sin `HF_DATASET_REPO`, la aplicación muestra un aviso en ro
   2. **El administrador restablece la contraseña** en **Usuarios**. Esto también desbloquea la cuenta y deja una contraseña temporal.
   3. **Si el único administrador pierde el acceso:** en el computador, con los mismos secretos, se ejecuta `python mapeo.py restablecer-clave --usuario nata`.
 - **Mi cuenta:** cada persona cambia ahí su contraseña y genera códigos nuevos.
+- **Sesión:**
+  - No se cierra sola por tiempo de uso.
+  - Si se corta la conexión o la app se reinicia, al volver a la misma dirección se entra sin escribir la contraseña, durante 12 horas. Esto funciona con una ficha firmada en la dirección de la página, así que no se debe compartir la dirección con `?s=` al final: para compartir la app se usa la dirección sin ese final.
+  - **Cerrar sesión** o cambiar la contraseña anulan la ficha en todos los navegadores.
 
 ## Calidad del dato
 
@@ -189,11 +195,21 @@ En la página **Base y calidad** se filtran por regla y se corrigen una por una;
 python mapeo.py auditar ruta/al/export.csv
 ```
 
+## Duplicados por año
+
+Muchas becas y subvenciones abren cada año con el mismo enlace. **Cada año es una edición nueva y se registra.** Lo que el sistema impide es registrar dos veces la misma convocatoria **en el mismo año**:
+- **Año de la convocatoria:** se toma de la fecha límite; si no hay, de la fecha de apertura; si tampoco, de la fecha de registro.
+- **Mismo enlace y mismo año:** es un duplicado. El mapeo no la vuelve a enviar a la bandeja, y si se registra a mano es un error.
+- **Nombre casi igual en el mismo año:** sale una alerta para revisarlo.
+- **Mismo enlace de otro año:** es una **nueva edición** y se permite. En la bandeja queda marcada como «Nueva edición» con el año de la anterior.
+- **Permanentes:** una convocatoria permanente es la misma mientras siga abierta.
+- **Descartadas:** lo descartado este año tampoco vuelve a llegar a la bandeja.
+
 ## Bandeja de revisión
 
 | Pestaña | Qué se hace |
 |---|---|
-| Por revisar | Abrir la página oficial, comprobar los enlaces, corregir los datos y ver la calidad en vivo. Para aprobar hay que marcar la lista de chequeo de 11 puntos y no tener errores |
+| Por revisar | Vista de trabajo, con estas partes: <ul><li>**Indicadores:** por revisar, llegadas en los últimos 7 días, cierran en 30 días, sin errores y nuevas ediciones.</li><li>**Filtros:** origen (mapeo automático, Gemini, manual, Airtable), modalidad, cierre, elegibilidad, texto y «solo sin errores».</li><li>**Tabla:** con semáforo de cierre y enlace a la página oficial. Una fila marcada abre su revisión completa; varias marcadas se **descartan en bloque** con un motivo de la lista.</li></ul> Para aprobar hay que marcar la lista de chequeo de 11 puntos y no tener errores |
 | Actores pendientes | Actores que faltan en CICLOPE, con descarga de sus datos para el sistema de creación de actores. Al registrar uno como creado, sus convocatorias ya revisadas entran solas a la base |
 | Registrar convocatoria | Reemplaza el formulario de Airtable, con las mismas listas y validaciones |
 | En la base | Convocatorias ya aprobadas (se corrigen en "Base y calidad") |
@@ -268,6 +284,13 @@ Cada fuente revisa las cuatro modalidades (columna **Modalidades a buscar** = «
 Las fuentes con dominio **Por confirmar** o sin dominio quedan inactivas. El pack de becas es material comercial de una empresa de mentorías: no se usaron sus enlaces sino los oferentes oficiales de cada programa (los enlaces acortados, de asesorías privadas o de convocatorias 2022 se descartaron).
 
 ### Uso
+
+Las ejecuciones (validar fuentes, mapeo y búsqueda con Gemini) **corren en segundo plano en el servidor**:
+- Siguen aunque se cierre la pestaña, se apague el computador o se cierre la sesión.
+- La página muestra el avance y tiene un botón **Detener**.
+- Hay una sola ejecución a la vez para todo el sistema.
+- Lo encontrado se guarda **fuente por fuente**: las convocatorias llegan a la bandeja mientras corre, y la validación guarda su avance cada 10 fuentes.
+- Si el servidor se reinicia a mitad de camino, la página lo avisa. Al volver a ejecutarla, no se repite lo que ya está en el sistema.
 
 Desde la página **Mapeo automático**:
 

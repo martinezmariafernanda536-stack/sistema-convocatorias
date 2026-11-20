@@ -53,6 +53,29 @@ def crear_lector(cfg, args):
     )
 
 
+# --- Ganchos para ejecutar desde la aplicación en segundo plano -----------------
+import threading  # noqa: E402
+
+ALMACEN = None                 # base compartida con la aplicación (si no, se abre una)
+DETENER = threading.Event()    # la aplicación lo activa con el botón «Detener»
+AL_GUARDAR = None              # función(tipo, ruta): la aplicación guarda el avance (config, historial) en la base
+
+
+def _almacen():
+    if ALMACEN is not None:
+        return ALMACEN
+    from bandeja.almacen import abrir
+    return abrir()
+
+
+def _avisar(tipo, ruta):
+    if AL_GUARDAR:
+        try:
+            AL_GUARDAR(tipo, ruta)
+        except Exception as e:  # noqa: BLE001 - guardar el avance nunca debe tumbar la ejecución
+            log.warning("No se pudo guardar el avance (%s): %s", tipo, e)
+
+
 # ---------------------------------------------------------------------------
 def fuentes_a_revisar(cfg, args, solo_activas=True):
     fuentes = [f for f in cfg.fuentes if f.activa or not solo_activas]
@@ -71,12 +94,23 @@ def en_paralelo(cfg, args, fuentes, tarea):
     hilos = 1 if args.prueba else max(1, int(cfg.p("Fuentes en paralelo", 6) or 1))
     if hilos == 1:
         for f in fuentes:
+            if DETENER.is_set():
+                log.warning("Detenido: lo revisado hasta aquí ya quedó guardado.")
+                return
             yield f, tarea(f)
         return
     with ThreadPoolExecutor(max_workers=hilos) as ex:
         futuros = {ex.submit(tarea, f): f for f in fuentes}
         for fut in as_completed(futuros):
-            yield futuros[fut], fut.result()
+            if DETENER.is_set():
+                for otro in futuros:
+                    otro.cancel()
+                log.warning("Detenido: se terminan las fuentes que ya estaban en curso; lo revisado ya quedó guardado.")
+                return
+            try:
+                yield futuros[fut], fut.result()
+            except Exception as e:  # noqa: BLE001 - una fuente con error no detiene las demás
+                log.warning("%-10s error inesperado: %s", futuros[fut].id, e)
 
 
 def _palabras_nombre(nombre):
@@ -122,19 +156,31 @@ def validar_fuentes(cfg, args):
     hoy = args.hoy.strftime("%d/%m/%Y")
     fuentes = fuentes_a_revisar(cfg, args, solo_activas=False)
     log.info("Validando %d fuentes…", len(fuentes))
+    hechas = 0
     for f, (estado, urls, sitio) in en_paralelo(cfg, args, fuentes, lambda f: validar_una(f, cfg, args)):
+        hechas += 1
         if urls:
             ws.cell(row=f.fila, column=col_url).value = urls
         ws.cell(row=f.fila, column=col["Estado de validación"]).value = estado
         ws.cell(row=f.fila, column=col["Última validación"]).value = hoy
         if "Nombre del sitio" in col and sitio:
             ws.cell(row=f.fila, column=col["Nombre del sitio"]).value = sitio
-        log.info("%-10s %-55s %s", f.id, f.nombre[:55], estado)
+        log.info("%-10s %-55s %s   [%d de %d]", f.id, f.nombre[:55], estado, hechas, len(fuentes))
+        if hechas % 10 == 0:  # se guarda el avance: si se interrumpe, no se pierde lo validado
+            wb.save(cfg.ruta)
+            _avisar("config", cfg.ruta)
     wb.save(cfg.ruta)
+    _avisar("config", cfg.ruta)
     log.info("Configuración actualizada: %s (respaldo en %s)", cfg.ruta.name, respaldo.name)
 
 
 # ---------------------------------------------------------------------------
+def candidato_fechas(datos, hoy):
+    f = lambda d: f"{d.day}/{d.month}/{d.year}" if d else ""  # noqa: E731
+    return {"¿La convocatoria es permanente?": "Si" if datos.get("permanente") else "No",
+            "Fecha Límite de Aplicación": f(datos.get("cierre")), "Fecha de Registro": f(hoy)}
+
+
 def revisar_fuente(fuente, cfg, args, icetex, duplicados):
     """Lee una fuente y devuelve sus hallazgos sin tocar nada compartido (se puede correr en paralelo)."""
     hoy = args.hoy
@@ -167,7 +213,7 @@ def revisar_fuente(fuente, cfg, args, icetex, duplicados):
             elig = reglas.elegibilidad(datos["texto_norm"], cfg)
             # ICETEX solo ofrece becas: la exclusión no aplica a subvenciones, cooperación técnica ni premios
             en_icetex = icetex.revisar(datos["titulo"], r.url, datos) if datos["modalidad"] == "Beca" else (False, "No aplica (no es beca)")
-            dup = duplicados.revisar(datos["titulo"], r.url)
+            dup = duplicados.revisar(datos["titulo"], r.url, candidato_fechas(datos, hoy))
             fila = salidas.fila_airtable(datos, r.url, fuente, pagina, cfg, elig, en_icetex, dup, hoy)
             fila["_texto"] = datos.get("texto_pagina", "")
             motivo = ("Está en ICETEX: " + en_icetex[1] if en_icetex[0] else
@@ -183,8 +229,7 @@ def mapear(cfg, args):
     icetex = reglas.IndiceIcetex(cfg, crear_lector(cfg, args))
     for nota in icetex.notas:
         log.warning(nota)
-    from bandeja.almacen import abrir
-    base = abrir().base()
+    base = _almacen().base()
     df_air = pd.DataFrame(base) if base else (pd.read_csv(args.csv) if args.csv and Path(args.csv).exists() else None)
     if df_air is None:
         log.warning("La base está vacía: no se revisarán duplicados.")
@@ -194,10 +239,15 @@ def mapear(cfg, args):
 
     fuentes = fuentes_a_revisar(cfg, args)
     log.info("Revisando %d fuentes (becas, subvenciones, cooperación técnica y premios)…", len(fuentes))
+    from calidad.reglas import CATALOGOS
+    from motor import externo
+    cupo_gemini = int(cfg.p("Máximo de convocatorias a completar con Gemini por corrida", 80) or 0)
     filas, descartadas, resumen, leidas, vistas = [], [], [], set(), set()
+    enviadas_total = hechas = 0
     for fuente, res in en_paralelo(cfg, args, fuentes, lambda f: revisar_fuente(f, cfg, args, icetex, duplicados)):
+        hechas += 1
         revision = desc = 0
-        por_modalidad = {}
+        por_modalidad, nuevas = {}, []
         if res["leida"]:
             leidas.add(fuente.id)
         for tipo, url, fila, motivo in res["hallazgos"]:
@@ -209,22 +259,26 @@ def mapear(cfg, args):
                 descartadas.append((motivo, fila["Nombre de la Convocatoria"], url, fuente.id))
                 desc += 1
             else:
-                filas.append(fila)
+                nuevas.append(fila)
                 revision += 1
                 m = fila["Modalidad"].split(" (")[0]
                 por_modalidad[m] = por_modalidad.get(m, 0) + 1
+        # se completa y se envía a la bandeja fuente por fuente: si la ejecución se interrumpe, nada de esto se pierde
+        if nuevas and cupo_gemini > 0:
+            n = externo.completar_mapeo(nuevas, cfg, CATALOGOS, hoy, maximo=cupo_gemini)
+            cupo_gemini -= n
+        for f in nuevas:
+            f.pop("_texto", None)
+        filas.extend(nuevas)
+        if nuevas and not getattr(args, "sin_bandeja", False):
+            enviadas_total += enviar_a_bandeja(cfg, nuevas)
+        historial.guardar()
+        _avisar("historial", historial.ruta)
         nota = res["nota"] + (" | " + ", ".join(f"{k}: {v}" for k, v in por_modalidad.items()) if por_modalidad else "")
         resumen.append((fuente.id, fuente.nombre, fuente.tipo, len(res["paginas"]), res["analizadas"], revision, desc, nota))
-        log.info("%-10s páginas %d · analizadas %d · para revisión %d · descartadas %d", fuente.id, len(res["paginas"]),
-                 res["analizadas"], revision, desc)
+        log.info("%-10s páginas %d · analizadas %d · para revisión %d · descartadas %d   [%d de %d]", fuente.id,
+                 len(res["paginas"]), res["analizadas"], revision, desc, hechas, len(fuentes))
 
-    from calidad.reglas import CATALOGOS
-    from motor import externo
-    n_gem = externo.completar_mapeo(filas, cfg, CATALOGOS, hoy)
-    if n_gem:
-        log.info("%d convocatorias completadas con Gemini.", n_gem)
-    for f in filas:
-        f.pop("_texto", None)
     retiradas = historial.retiradas(leidas)
     carpeta = RAIZ / "salidas"
     carpeta.mkdir(exist_ok=True)
@@ -233,8 +287,7 @@ def mapear(cfg, args):
     historial.guardar()
     log.info("Listo: %d convocatorias para revisión, %d descartadas, %d ya no aparecen.", len(filas), len(descartadas), len(retiradas))
     if not getattr(args, "sin_bandeja", False):
-        n = enviar_a_bandeja(cfg, filas)
-        log.info("%d convocatorias nuevas o actualizadas enviadas a la bandeja de revisión.", n)
+        log.info("%d convocatorias nuevas o actualizadas enviadas a la bandeja de revisión.", enviadas_total)
         log.info("Reporte de la corrida: %s", ruta.name)
     return ruta
 
@@ -242,16 +295,22 @@ def mapear(cfg, args):
 def enviar_a_bandeja(cfg, filas, origen="Mapeo automático"):
     """Las convocatorias mapeadas nunca van directo a la base: entran a la bandeja para revisión humana."""
     from bandeja import flujo
-    from bandeja.almacen import abrir
-    almacen = abrir()
-    ya = {i["datos"].get("Cómo aplicar", "").rstrip("/").lower() for i in almacen.items()}
+    almacen = _almacen()
+    ya = [i["datos"] for i in almacen.items()]  # incluye descartadas: lo descartado este año no vuelve a llegar
+    enviadas = 0
+    with almacen.lote(f"{origen}: {len(filas)} convocatorias"):
+        enviadas = _enviar(cfg, filas, origen, almacen, ya, flujo)
+    return enviadas
+
+
+def _enviar(cfg, filas, origen, almacen, ya, flujo):
     enviadas = 0
     for fila in filas:
         if fila["[Sistema] Estado"] == "Sin cambios":
             continue
-        url = fila.get("Cómo aplicar", "").rstrip("/").lower()
-        if url in ya:
-            continue
+        from calidad.reglas import buscar_duplicado
+        if buscar_duplicado(fila, ya)[0] == "mismo_año":
+            continue  # ya está en el sistema para este año (en la base, en la bandeja o descartada)
         datos = {c: fila.get(c, "") for c in cfg.columnas_airtable}
         from calidad.reglas import CAMPO_APERTURA, CAMPO_REQUISITOS
         for extra in ("Tipo de monto", CAMPO_APERTURA, CAMPO_REQUISITOS):
@@ -268,7 +327,7 @@ def enviar_a_bandeja(cfg, filas, origen="Mapeo automático"):
                 "duplicado": fila["[Sistema] Duplicado en Airtable"], "alerta_cierre": fila["[Sistema] Alerta de cierre"],
                 "gemini": fila.get("[Sistema] Propuesta de Gemini", "")}
         flujo.ingresar(almacen, datos, f"{origen} · {fila['[Sistema] Fuente ID']}", origen, meta)
-        ya.add(url)
+        ya.append(datos)
         enviadas += 1
     return enviadas
 
@@ -276,11 +335,10 @@ def enviar_a_bandeja(cfg, filas, origen="Mapeo automático"):
 # ---------------------------------------------------------------------------
 def buscar_externo(cfg, args):
     """Búsqueda externa con Gemini: encuentra convocatorias en sitios oficiales que no están entre las fuentes."""
-    from bandeja.almacen import abrir
     from calidad.reglas import CATALOGOS
     from motor import externo
     hoy = args.hoy
-    almacen = abrir()
+    almacen = _almacen()
     lector = crear_lector(cfg, args)
     icetex = reglas.IndiceIcetex(cfg, lector)
     base = almacen.base()

@@ -82,8 +82,11 @@ def ingresar(almacen, datos, origen, usuario, meta=None, hoy=None):
     return item, hallazgos
 
 
-def guardar_cambios(almacen, item, datos, usuario):
+def guardar_cambios(almacen, item, datos, usuario, hoy=None):
     item["datos"] = dict(datos)
+    _, hallazgos = evaluar(almacen, datos, hoy)
+    item["meta"]["pendientes"] = [h.__dict__ for h in hallazgos if h.nivel in ("Error", "Alerta") and h.regla != "R07"]
+    item["meta"].pop("hallazgos_ingreso", None)
     _evento(item, usuario, "Edición")
     almacen.guardar_item(item)
     return item
@@ -111,6 +114,28 @@ def aprobar(almacen, item, datos, usuario, chequeo, hoy=None):
         _evento(item, usuario, "Aprobada y enviada a la base")
     almacen.guardar_item(item)
     return item["estado"], hallazgos
+
+
+MOTIVOS_DESCARTE = ["No es una convocatoria (noticia, página general, empleo)", "Colombia no es elegible",
+                    "Ya cerró", "Duplicada en el mismo año", "La fuente no es oficial", "Beca ofrecida vía ICETEX",
+                    "Información insuficiente", "Otro motivo"]
+
+
+def pendientes(item):
+    """Hallazgos de calidad guardados (Error/Alerta) de una convocatoria de la bandeja."""
+    m = item.get("meta", {})
+    lista = m.get("pendientes") if "pendientes" in m else m.get("hallazgos_ingreso", [])
+    return [h for h in (lista or []) if h.get("nivel") in ("Error", "Alerta") and h.get("regla") != "R07"]
+
+
+def descartar_varias(almacen, items, usuario, motivo):
+    """Descarta varias convocatorias en una sola operación (una sola versión en el repositorio)."""
+    if not motivo.strip():
+        raise ErrorFlujo("Elige el motivo del descarte")
+    with almacen.lote(f"Descartadas {len(items)} convocatorias"):
+        for item in items:
+            descartar(almacen, item, usuario, motivo)
+    return len(items)
 
 
 def descartar(almacen, item, usuario, motivo):

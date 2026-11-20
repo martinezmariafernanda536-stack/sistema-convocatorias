@@ -179,8 +179,11 @@ class AlmacenSQLite:
     def __init__(self, ruta=None, sincronizador=None, refresco_segundos=30, clave_cuentas=None, base_inicial=None):
         self.ruta = Path(ruta or os.environ.get("BASE_DATOS") or RAIZ / "datos" / "convocatorias.db")
         self.ruta.parent.mkdir(parents=True, exist_ok=True)
+        import threading
         self.sync = sincronizador
         self.refresco = refresco_segundos
+        self._candado = threading.RLock()  # la búsqueda en segundo plano y las personas comparten la base
+        self._lote = None
         clave_cuentas = clave_cuentas if clave_cuentas is not None else os.environ.get("USUARIOS_CLAVE", "")
         self.fernet = cifrador(clave_cuentas) if clave_cuentas else None
         if self.sync and getattr(self.sync, "publico", False) and not self.fernet:
@@ -208,40 +211,76 @@ class AlmacenSQLite:
         return con
 
     def _refrescar(self, forzar=False):
-        if not self.sync:
+        if not self.sync or self._lote is not None:
             return
-        if forzar or time.time() - self.sync.revisado > self.refresco:
-            remoto = self.sync.remoto()
-            if remoto != self.sync.sha:
-                self.sync.descargar(self.ruta)
-            self.sync.revisado = time.time()
+        with self._candado:
+            if forzar or time.time() - self.sync.revisado > self.refresco:
+                remoto = self.sync.remoto()
+                if remoto != self.sync.sha:
+                    self.sync.descargar(self.ruta)
+                self.sync.revisado = time.time()
 
     def _leer(self, sql, params=()):
         self._refrescar()
+        with self._candado:
+            con = self._abrir()
+            try:
+                return [dict(r) for r in con.execute(sql, params).fetchall()]
+            finally:
+                con.close()
+
+    def _aplicar(self, operacion):
         con = self._abrir()
         try:
-            return [dict(r) for r in con.execute(sql, params).fetchall()]
+            operacion(con)
+            con.commit()
         finally:
             con.close()
 
     def _escribir(self, operacion, mensaje):
         """Aplica una operación; si otra persona guardó al mismo tiempo, se vuelve a aplicar sobre su versión."""
-        for _ in range(4):
-            self._refrescar(forzar=True)
-            con = self._abrir()
-            try:
-                operacion(con)
-                con.commit()
-            finally:
-                con.close()
-            if not self.sync:
+        with self._candado:
+            if self._lote is not None:  # dentro de un lote: se sube una sola vez al final
+                self._aplicar(operacion)
+                self._lote.append(operacion)
                 return
-            try:
-                self.sync.subir(self.ruta, mensaje)
-                return
-            except Conflicto:
-                self.sync.descargar(self.ruta)
-        raise RuntimeError("No se pudo guardar: hubo demasiados cambios simultáneos. Intenta de nuevo.")
+            for _ in range(4):
+                self._refrescar(forzar=True)
+                self._aplicar(operacion)
+                if not self.sync:
+                    return
+                try:
+                    self.sync.subir(self.ruta, mensaje)
+                    return
+                except Conflicto:
+                    self.sync.descargar(self.ruta)
+            raise RuntimeError("No se pudo guardar: hubo demasiados cambios simultáneos. Intenta de nuevo.")
+
+    def lote(self, mensaje):
+        """Agrupa varios cambios en una sola versión del repositorio (por ejemplo, lo que encontró una fuente)."""
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _lote():
+            with self._candado:
+                self._refrescar(forzar=True)
+                self._lote = []
+                try:
+                    yield self
+                finally:
+                    operaciones, self._lote = self._lote, None
+                    if operaciones and self.sync:
+                        for _ in range(4):
+                            try:
+                                self.sync.subir(self.ruta, mensaje)
+                                break
+                            except Conflicto:
+                                self.sync.descargar(self.ruta)
+                                for op in operaciones:
+                                    self._aplicar(op)
+                        else:
+                            raise RuntimeError("No se pudo guardar el lote: hubo demasiados cambios simultáneos.")
+        return _lote()
 
     # -- convocatorias ---------------------------------------------------------
     @staticmethod

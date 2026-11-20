@@ -128,25 +128,24 @@ class IndiceIcetex:
 
 # --- duplicados en Airtable --------------------------------------------------
 class IndiceAirtable:
+    """Convocatorias ya registradas, para no repetirlas en el mismo año (otro año = nueva edición)."""
+
     def __init__(self, df, umbral=90):
         self.umbral = float(umbral)
-        self.nombres = df["Nombre de la Convocatoria"].dropna().astype(str).tolist() if df is not None else []
-        self.urls = set()
-        if df is not None:
-            for c in ("Cómo aplicar", "Link de la Fuente Oferente"):
-                if c in df:
-                    self.urls |= {str(u).rstrip("/").lower() for u in df[c].dropna()}
+        self.registros = [] if df is None else [
+            {k: ("" if (isinstance(v, float) and v != v) else v) for k, v in r.items()} for r in df.to_dict("records")]
 
-    def revisar(self, titulo, url):
-        if url.rstrip("/").lower() in self.urls:
-            return "Ya está en la base (misma URL)"
-        mejor, nombre = 0, ""
-        for n in self.nombres:
-            s = similitud(titulo, n)
-            if s > mejor:
-                mejor, nombre = s, n
-        if mejor >= self.umbral:
-            return f"Posible duplicado de «{nombre}» ({mejor:.0f}%)"
+    def revisar(self, titulo, url, candidato=None):
+        from calidad.reglas import buscar_duplicado, describir_periodo
+        d = dict(candidato or {}) | {"Nombre de la Convocatoria": titulo, "Cómo aplicar": url}
+        tipo, otro = buscar_duplicado(d, self.registros, self.umbral)
+        nombre = (otro or {}).get("Nombre de la Convocatoria", "")
+        if tipo == "mismo_año":
+            return f"Ya está en la base para {describir_periodo(otro)} (misma URL)"
+        if tipo == "nombre_mismo_año":
+            return f"Posible duplicado de «{nombre}» ({describir_periodo(otro)})"
+        if tipo == "edicion_anterior":
+            return f"Nueva edición: ya se registró la de {describir_periodo(otro)} («{nombre[:80]}»)"
         return ""
 
 

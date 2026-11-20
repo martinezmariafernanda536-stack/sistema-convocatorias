@@ -22,7 +22,9 @@ with c1:
     if ok:
         try:
             U.cambiar_clave(A, YO["usuario"], actual, nueva, nueva2)
-            st.success("Contraseña cambiada.")
+            st.session_state["ficha"] = U.emitir_sesion(A, YO["usuario"])
+            st.query_params["s"] = st.session_state["ficha"]
+            st.success("Contraseña cambiada. Las sesiones abiertas en otros navegadores se cerraron.")
         except (U.ErrorClave, ValueError) as e:
             st.error(str(e))
 with c2:

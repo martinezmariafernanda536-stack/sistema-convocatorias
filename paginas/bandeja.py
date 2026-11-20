@@ -70,62 +70,163 @@ t_rev, t_act, t_reg, t_pub, t_desc, t_cat = st.tabs([
     "Registrar convocatoria", f"En la base ({len(por_estado['Aprobada'])})", f"Descartadas ({len(por_estado['Descartada'])})",
     "Catálogo de actores"])
 
+def _origen(i):
+    o = i["origen"]
+    return ("Búsqueda con Gemini" if o.startswith("Búsqueda externa") else "Mapeo automático" if o.startswith("Mapeo")
+            else "Airtable" if ("Airtable" in o or "Migración" in o) else "Registro manual")
+
+
+def _fila_triaje(i, hoy):
+    d, m = i["datos"], i.get("meta", {})
+    cierre = R.fecha(d.get("Fecha Límite de Aplicación"))
+    dias = (cierre - hoy).days if cierre else None
+    perm = d.get("¿La convocatoria es permanente?") == "Si"
+    pend = F.pendientes(i)
+    err = sum(1 for h in pend if h["nivel"] == "Error")
+    semaforo = ("⚪ Permanente" if perm else "⚫ Sin fecha" if dias is None else "🔴 Cerrada" if dias < 0 else
+                "🔴" if dias < 15 else "🟠" if dias <= 37 else "🟢")
+    elig = str(m.get("elegibilidad", "")).split(" · ")[0]
+    dup = str(m.get("duplicado", ""))
+    return {"id": i["id"], "Listo": "✅" if not err else "", "Cierre": semaforo, "Días": dias if not perm else None,
+            "Convocatoria": d.get("Nombre de la Convocatoria", "(sin nombre)"), "Oferente": d.get("Nombre de la Fuente", ""),
+            "Modalidad": R.modalidad_corta(d.get("Modalidad")), "Elegibilidad": elig or "—",
+            "Errores": err, "Alertas": len(pend) - err, "Origen": _origen(i),
+            "Edición": "Nueva edición" if dup.startswith("Nueva edición") else "",
+            "Llegó": i["ingreso"][:10], "Página": d.get("Cómo aplicar", "") if str(d.get("Cómo aplicar", "")).startswith("http") else None}
+
+
 with t_rev:
-    lista = sorted(por_estado["Por revisar"], key=lambda i: i["ingreso"])
-    if not lista:
+    todas = por_estado["Por revisar"]
+    if not todas:
         st.success("No hay convocatorias por revisar.")
     else:
-        etiquetas = {i["id"]: f"{i['datos'].get('Nombre de la Convocatoria', '(sin nombre)')[:90]}  ·  {i['origen']}" for i in lista}
-        sel = st.selectbox("Convocatoria", list(etiquetas), format_func=etiquetas.get, key="sel_rev")
-        item = next(i for i in lista if i["id"] == sel)
-        izq, der = st.columns([1.9, 1])
-        with izq:
-            datos = formulario(CTX, item["datos"], f"r_{item['id']}_")
-        with der:
-            info_mapeo(item)
-            enlace = datos.get("Cómo aplicar", "")
-            if enlace.startswith("http"):
-                st.link_button("Abrir la página oficial", enlace, width="stretch")
-            if st.button("Comprobar que los enlaces funcionan", key="ce_" + item["id"], width="stretch"):
-                with st.spinner("Abriendo los enlaces…"):
-                    st.session_state["enl_" + item["id"]] = F.comprobar_enlaces(datos)
-            for campo, url, estado, ok in st.session_state.get("enl_" + item["id"], []):
-                (st.success if ok else st.error)(f"{'✓' if ok else '✗'} {campo}: {estado}\n\n{url[:90]}")
-            st.markdown("#### Calidad del dato")
-            norm, hallazgos = panel_validacion(CTX, datos)
-            st.markdown("#### Lista de chequeo")
-            chequeo = {c: st.checkbox(c, key=f"chk_{item['id']}_{n}") for n, c in enumerate(F.LISTA_CHEQUEO)}
+        hoy = date.today()
+        tabla = pd.DataFrame([_fila_triaje(i, hoy) for i in todas])
+        tabla["Días"] = pd.to_numeric(tabla["Días"], errors="coerce").astype("Int64")
+        dias = lambda df, si_vacio: df["Días"].fillna(si_vacio)  # noqa: E731
+        k = st.columns(5)
+        hace7 = (hoy - pd.Timedelta(days=7)).isoformat()
+        for col, (v, lab) in zip(k, [
+                (len(tabla), "por revisar"),
+                (int(((tabla["Origen"] != "Airtable") & (tabla["Llegó"] >= hace7)).sum()), "llegaron en los últimos 7 días"),
+                (int(((dias(tabla, -1) >= 0) & (dias(tabla, -1) <= 30)).sum()), "cierran en 30 días o menos"),
+                (int((tabla["Errores"] == 0).sum()), "sin errores pendientes"),
+                (int((tabla["Edición"] != "").sum()), "nuevas ediciones de años anteriores")]):
+            col.markdown(f"<div class='kpi'><div class='v'>{v}</div><div class='l'>{lab}</div></div>", unsafe_allow_html=True)
+        st.write("")
+        f1, f2, f3, f4 = st.columns([1.3, 1.3, 1.1, 1.1])
+        origenes = f1.multiselect("Origen", ["Mapeo automático", "Búsqueda con Gemini", "Registro manual", "Airtable"],
+                                  placeholder="Todos")
+        modalidades = f2.multiselect("Modalidad", sorted(tabla["Modalidad"].unique()), placeholder="Todas")
+        cierre = f3.selectbox("Cierre", ["Todas", "Cierra en 30 días o menos", "Con más de un mes y una semana",
+                                         "Sin fecha o permanente", "Ya cerró"])
+        orden = f4.selectbox("Ordenar por", ["Cierre más próximo", "Más recientes", "Menos errores", "Oferente"])
+        g1, g2, g3 = st.columns([2.2, 1.2, 1.1])
+        buscar = g1.text_input("Buscar por nombre u oferente", placeholder="Ej.: DAAD, clima, maestría")
+        elegs = g2.multiselect("Elegibilidad automática", ["Elegible", "Probable", "Revisar"], placeholder="Todas")
+        solo_listas = g3.toggle("Solo sin errores")
+        v = tabla.copy()
+        if origenes:
+            v = v[v["Origen"].isin(origenes)]
+        if modalidades:
+            v = v[v["Modalidad"].isin(modalidades)]
+        if elegs:
+            v = v[v["Elegibilidad"].isin(elegs)]
+        if solo_listas:
+            v = v[v["Errores"] == 0]
+        if buscar:
+            b = buscar.lower()
+            v = v[v["Convocatoria"].str.lower().str.contains(b, regex=False) | v["Oferente"].str.lower().str.contains(b, regex=False)]
+        if cierre == "Cierra en 30 días o menos":
+            v = v[(dias(v, -1) >= 0) & (dias(v, -1) <= 30)]
+        elif cierre == "Con más de un mes y una semana":
+            v = v[dias(v, -1) > 37]
+        elif cierre == "Sin fecha o permanente":
+            v = v[v["Días"].isna()]
+        elif cierre == "Ya cerró":
+            v = v[dias(v, 0) < 0]
+        v = {"Cierre más próximo": v.assign(_o=dias(v, 10_000)).sort_values(["_o", "Convocatoria"]).drop(columns="_o"),
+             "Más recientes": v.sort_values("Llegó", ascending=False), "Menos errores": v.sort_values(["Errores", "Alertas"]),
+             "Oferente": v.sort_values("Oferente")}[orden]
+        st.caption(f"{len(v)} de {len(tabla)} convocatorias · marca una fila para revisarla; marca varias para descartarlas juntas. "
+                   "🔴 cierra en menos de 15 días · 🟠 en un mes y una semana o menos · 🟢 con más plazo.")
+        evento = st.dataframe(
+            v.drop(columns="id"), hide_index=True, width="stretch", height=min(560, 38 + 35 * max(len(v), 1)),
+            on_select="rerun", selection_mode="multi-row", key="tabla_triaje",
+            column_config={"Página": st.column_config.LinkColumn("Página", display_text="Abrir ↗"),
+                           "Días": st.column_config.NumberColumn("Días para cierre", format="%d"),
+                           "Convocatoria": st.column_config.TextColumn(width="large"),
+                           "Errores": st.column_config.NumberColumn(format="%d"), "Alertas": st.column_config.NumberColumn(format="%d")})
+        filas_sel = evento.selection.rows if evento and evento.selection else []
+        ids_sel = [v.iloc[n]["id"] for n in filas_sel if n < len(v)]
+        if len(ids_sel) > 1 and PUEDE_REVISAR:
             with st.container(border=True):
-                st.markdown("**Socialización** · aparte de la validación")
-                st.caption("No afecta la aprobación: toda convocatoria válida entra a la base. "
-                           "Esto solo sugiere si, además, conviene difundirla por los canales institucionales.")
-                if norm.get(R.CAMPO_MOTIVO_PRIORIZACION):
-                    sug = bool(norm.get("Se sugiere para priorización"))
-                    st.markdown(("⭐ **Se sugiere para socializar.** " if sug else "**No se sugiere para socializar.** ")
-                                + norm[R.CAMPO_MOTIVO_PRIORIZACION])
-            if st.button("Guardar cambios", key="g_" + item["id"], width="stretch"):
-                F.guardar_cambios(A, item, datos, YO["nombre"])
-                st.toast("Cambios guardados")
-                recargar()
-            if PUEDE_REVISAR:
-                if st.button("Aprobar y enviar a la base", type="primary", key="a_" + item["id"], width="stretch"):
-                    try:
-                        estado, _ = F.aprobar(A, item, datos, YO["nombre"], chequeo)
-                        st.session_state["aviso"] = ("Aprobada y enviada a la base." if estado == "Aprobada" else
-                                                     "Revisión aprobada. Queda en espera hasta que el actor esté creado en CICLOPE.")
-                        recargar()
-                    except F.ErrorFlujo as e:
-                        st.error(str(e))
-                with st.expander("Descartar"):
-                    motivo = st.text_area("Motivo del descarte", key="m_" + item["id"])
-                    if st.button("Descartar convocatoria", key="d_" + item["id"]):
+                st.markdown(f"**{len(ids_sel)} convocatorias seleccionadas**")
+                d1, d2, d3 = st.columns([1.6, 1.6, 0.8])
+                motivo = d1.selectbox("Motivo del descarte", F.MOTIVOS_DESCARTE, key="mot_lote")
+                detalle = d2.text_input("Detalle (opcional)", key="det_lote")
+                if d3.button("Descartar seleccionadas", type="primary", width="stretch"):
+                    elegidos = [i for i in todas if i["id"] in ids_sel]
+                    n = F.descartar_varias(A, elegidos, YO["nombre"], motivo + (f": {detalle}" if detalle else ""))
+                    st.session_state["aviso"] = f"{n} convocatorias descartadas."
+                    recargar()
+                st.caption("Para revisar una por una, deja marcada solo una fila.")
+        elif not len(v):
+            st.info("Ninguna convocatoria cumple los filtros.")
+        else:
+            sel = ids_sel[0] if ids_sel else v.iloc[0]["id"]
+            if not ids_sel:
+                st.caption("Mostrando la primera de la lista. Marca otra fila en la tabla para cambiarla.")
+            item = next(i for i in todas if i["id"] == sel)
+            st.markdown(f"### {item['datos'].get('Nombre de la Convocatoria', '(sin nombre)')}")
+            izq, der = st.columns([1.9, 1])
+            with izq:
+                datos = formulario(CTX, item["datos"], f"r_{item['id']}_")
+            with der:
+                info_mapeo(item)
+                enlace = datos.get("Cómo aplicar", "")
+                if enlace.startswith("http"):
+                    st.link_button("Abrir la página oficial", enlace, width="stretch")
+                if st.button("Comprobar que los enlaces funcionan", key="ce_" + item["id"], width="stretch"):
+                    with st.spinner("Abriendo los enlaces…"):
+                        st.session_state["enl_" + item["id"]] = F.comprobar_enlaces(datos)
+                for campo, url, estado, ok in st.session_state.get("enl_" + item["id"], []):
+                    (st.success if ok else st.error)(f"{'✓' if ok else '✗'} {campo}: {estado}\n\n{url[:90]}")
+                st.markdown("#### Calidad del dato")
+                norm, hallazgos = panel_validacion(CTX, datos)
+                st.markdown("#### Lista de chequeo")
+                chequeo = {c: st.checkbox(c, key=f"chk_{item['id']}_{n}") for n, c in enumerate(F.LISTA_CHEQUEO)}
+                with st.container(border=True):
+                    st.markdown("**Socialización** · aparte de la validación")
+                    st.caption("No afecta la aprobación: toda convocatoria válida entra a la base. "
+                               "Esto solo sugiere si, además, conviene difundirla por los canales institucionales.")
+                    if norm.get(R.CAMPO_MOTIVO_PRIORIZACION):
+                        sug = bool(norm.get("Se sugiere para priorización"))
+                        st.markdown(("⭐ **Se sugiere para socializar.** " if sug else "**No se sugiere para socializar.** ")
+                                    + norm[R.CAMPO_MOTIVO_PRIORIZACION])
+                if st.button("Guardar cambios", key="g_" + item["id"], width="stretch"):
+                    F.guardar_cambios(A, item, datos, YO["nombre"])
+                    st.toast("Cambios guardados")
+                    recargar()
+                if PUEDE_REVISAR:
+                    if st.button("Aprobar y enviar a la base", type="primary", key="a_" + item["id"], width="stretch"):
                         try:
-                            F.descartar(A, item, YO["nombre"], motivo)
+                            estado, _ = F.aprobar(A, item, datos, YO["nombre"], chequeo)
+                            st.session_state["aviso"] = ("Aprobada y enviada a la base." if estado == "Aprobada" else
+                                                         "Revisión aprobada. Queda en espera hasta que el actor esté creado en CICLOPE.")
                             recargar()
                         except F.ErrorFlujo as e:
                             st.error(str(e))
-            else:
-                st.info("Tu rol permite registrar y editar. La aprobación la hace un revisor.")
+                    with st.expander("Descartar"):
+                        motivo = st.text_area("Motivo del descarte", key="m_" + item["id"])
+                        if st.button("Descartar convocatoria", key="d_" + item["id"]):
+                            try:
+                                F.descartar(A, item, YO["nombre"], motivo)
+                                recargar()
+                            except F.ErrorFlujo as e:
+                                st.error(str(e))
+                else:
+                    st.info("Tu rol permite registrar y editar. La aprobación la hace un revisor.")
     if st.session_state.get("aviso"):
         st.success(st.session_state.pop("aviso"))
 
@@ -143,14 +244,19 @@ with t_act:
         tabla = pd.DataFrame([{"Actor": f["nombre"], "Tipo de actor": f["tipo"], "Estado en CICLOPE": f["estado_ciclope"],
                                "País": f["pais"], "Sitio web": f["web"],
                                "Convocatorias en espera": len(espera.get(f["nombre"].lower(), []))} for f in actores_pend])
-        tabla = tabla.sort_values("Convocatorias en espera", ascending=False)
-        st.dataframe(tabla, hide_index=True, width="stretch")
+        tabla = tabla.sort_values("Convocatorias en espera", ascending=False).reset_index(drop=True)
+        st.caption("Marca un actor en la tabla para registrarlo como creado en CICLOPE.")
+        ev_a = st.dataframe(tabla, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key="sel_actor",
+                            column_config={"Sitio web": st.column_config.LinkColumn()})
+        actor_marcado = tabla.iloc[ev_a.selection.rows[0]]["Actor"] if ev_a and ev_a.selection.rows else None
         st.download_button("Descargar datos para la solicitud de creación", tabla.to_csv(index=False).encode("utf-8-sig"),
                            f"actores_por_crear_{date.today():%Y-%m-%d}.csv")
         if PUEDE_REVISAR:
             st.markdown("#### Registrar actor creado en CICLOPE")
             c1, c2, c3 = st.columns([1.4, 1.4, 1])
-            elegido = c1.selectbox("Actor", tabla["Actor"].tolist(), key="ac_sel")
+            opciones = tabla["Actor"].tolist()
+            elegido = c1.selectbox("Actor", opciones, index=opciones.index(actor_marcado) if actor_marcado in opciones else 0,
+                                   key=f"ac_sel_{actor_marcado}")
             nombre_ciclope = c2.text_input("Nombre exacto en CICLOPE", value=elegido or "", key=f"ac_nom_{elegido}")
             tipo_actual = actor_por_nombre.get(elegido, {}).get("tipo", "Por clasificar")
             tipo = c3.selectbox("Tipo de actor", TIPOS, index=TIPOS.index(tipo_actual) if tipo_actual in TIPOS else len(TIPOS) - 1,

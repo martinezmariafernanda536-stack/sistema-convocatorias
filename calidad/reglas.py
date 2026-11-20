@@ -97,6 +97,56 @@ def criterios_vacios(texto_req, modalidad):
     return [c for c in PLANTILLAS.get(modalidad_corta(modalidad), []) if not leidos.get(c)]
 
 
+# --- Duplicados por año ---------------------------------------------------------
+# Muchas becas y subvenciones se repiten año tras año con el mismo enlace: cada año es una EDICIÓN nueva y se
+# registra. Lo que no puede pasar es registrar dos veces la misma convocatoria en el mismo año.
+def periodo(d):
+    """('permanente', None) o ('año', 2027): el año de la convocatoria sale de la fecha límite; si no hay, de la
+    fecha de apertura; si tampoco, de la fecha de registro."""
+    if str(d.get("¿La convocatoria es permanente?", "")).strip() in ("Si", "Sí"):
+        return ("permanente", None)
+    for campo in ("Fecha Límite de Aplicación", CAMPO_APERTURA, "Fecha de Registro"):
+        f = fecha(d.get(campo))
+        if f:
+            return ("año", f.year)
+    return ("año", None)
+
+
+def mismo_periodo(a, b):
+    pa, pb = periodo(a), periodo(b)
+    if "permanente" in (pa[0], pb[0]):
+        return True  # una convocatoria permanente sigue siendo la misma mientras esté abierta
+    return pa[1] is None or pb[1] is None or pa[1] == pb[1]
+
+
+def _url(v):
+    return texto(v).rstrip("/").lower()
+
+
+def buscar_duplicado(d, otros, umbral_nombre=92):
+    """Compara con otras convocatorias. Devuelve (tipo, otra) donde tipo es:
+    'mismo_año'         la misma convocatoria ya está registrada para ese año (duplicado)
+    'nombre_mismo_año'  nombre casi igual en el mismo año (posible duplicado: revisar)
+    'edicion_anterior'  la misma convocatoria de otro año (nueva edición: se puede registrar)
+    ''                  sin coincidencias"""
+    url, nombre = _url(d.get("Cómo aplicar", "")), texto(d.get("Nombre de la Convocatoria", ""))
+    anterior = None
+    for o in otros:
+        igual_url = url.startswith("http") and url == _url(o.get("Cómo aplicar", ""))
+        parecido = bool(nombre) and similitud(nombre, o.get("Nombre de la Convocatoria", "")) >= umbral_nombre
+        if not (igual_url or parecido):
+            continue
+        if mismo_periodo(d, o):
+            return ("mismo_año" if igual_url else "nombre_mismo_año"), o
+        anterior = anterior or o
+    return ("edicion_anterior", anterior) if anterior else ("", None)
+
+
+def describir_periodo(d):
+    p = periodo(d)
+    return "permanente" if p[0] == "permanente" else str(p[1] or "sin fecha")
+
+
 def priorizacion(r, hoy=None):
     """Criterios de socialización (numeral 5). Van APARTE de la validación: no deciden qué se busca, qué se aprueba
     ni qué entra a la base. Solo sugieren cuáles de las convocatorias ya válidas se difunden además por los canales
@@ -433,20 +483,15 @@ def validar(registro, catalogo=None, base=None, hoy=None, nuevo=True):
         r["Se sugiere para priorización"] = "checked" if sugerida else ""
         r[CAMPO_MOTIVO_PRIORIZACION] = motivo
 
-    # 9. Duplicados
+    # 9. Duplicados en el mismo año (otro año = nueva edición, se permite)
     if base:
-        url = r.get("Cómo aplicar", "").rstrip("/").lower()
-        for otro in base:
-            if otro is registro:
-                continue
-            otro_url = texto(otro.get("Cómo aplicar", "")).rstrip("/").lower()
-            if url and url.startswith("http") and url == otro_url:
-                add("Cómo aplicar", "Error", "Ya existe una convocatoria con el mismo enlace", otro.get("Nombre de la Convocatoria", ""), regla="R16")
-                break
-            if nombre and similitud(nombre, otro.get("Nombre de la Convocatoria", "")) >= 92:
-                add("Nombre de la Convocatoria", "Alerta", "Nombre muy parecido a otra convocatoria",
-                    otro.get("Nombre de la Convocatoria", ""), regla="R16")
-                break
+        tipo, otro = buscar_duplicado(r, [o for o in base if o is not registro])
+        if tipo == "mismo_año":
+            add("Cómo aplicar", "Error", f"Ya está registrada para {describir_periodo(otro)} con el mismo enlace",
+                otro.get("Nombre de la Convocatoria", ""), "Si es la misma convocatoria, descartarla o retirarla", "R16")
+        elif tipo == "nombre_mismo_año":
+            add("Nombre de la Convocatoria", "Alerta", f"Nombre muy parecido a otra convocatoria de {describir_periodo(otro)}",
+                otro.get("Nombre de la Convocatoria", ""), "Confirmar que no es la misma", "R16")
 
     return r, h
 
@@ -471,7 +516,7 @@ REGLAS = {
     "R13": "Monto en USD (cuando esté disponible) o descripción de los beneficios, y tipo de monto",
     "R14": "Nombre en español con el original entre paréntesis",
     "R15": "Descripción suficiente",
-    "R16": "Duplicados",
+    "R16": "Duplicados en el mismo año (la misma convocatoria de otro año es una nueva edición)",
     "R17": "Enlaces del sitio oficial del oferente (sin acortadores, agregadores, boletines de otras entidades ni ICETEX)",
     "R18": "Requisitos y condiciones de participación según la modalidad",
 }

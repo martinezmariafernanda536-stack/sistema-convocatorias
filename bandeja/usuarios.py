@@ -278,3 +278,51 @@ def recuperar_administrador(almacen, clave_instalacion, esperada, usuario, nueva
     sal, h, it = _nueva_sal_hash(nueva)
     almacen.guardar_cuenta(c | {"sal": sal, "hash": h, "iter": it, "activo": 1, "debe_cambiar": False, "fallidos": 0,
                                 "bloqueado_hasta": 0, "actualizado": time.time()})
+
+
+# --- sesión que sobrevive a reconexiones y reinicios --------------------------------
+HORAS_SESION = 12
+_SECRETO_PROCESO = secrets.token_hex(32)  # si no hay secretos (uso local), las sesiones duran hasta reiniciar
+
+
+def _secreto_sesion():
+    import os
+    base = os.environ.get("USUARIOS_CLAVE") or os.environ.get("CLAVE_INSTALACION") or _SECRETO_PROCESO
+    return hashlib.sha256(("sesion|" + base).encode()).digest()
+
+
+def _firma(texto):
+    return hmac.new(_secreto_sesion(), texto.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def emitir_sesion(almacen, usuario, horas=HORAS_SESION):
+    """Ficha firmada para la dirección de la página. Se anula al cerrar sesión o cambiar la contraseña."""
+    c = almacen.cuentas()[usuario]
+    vence = int(time.time() + horas * 3600)
+    cuerpo = f"{c['usuario']}.{vence}.{c.get('sesion', 0)}.{c['hash'][:12]}"
+    return f"{cuerpo}.{_firma(cuerpo)}"
+
+
+def leer_sesion(almacen, ficha):
+    """Devuelve la sesión si la ficha es válida, o None."""
+    try:
+        usuario, vence, version, h, firma = str(ficha).rsplit(".", 4)
+    except ValueError:
+        return None
+    cuerpo = f"{usuario}.{vence}.{version}.{h}"
+    if not hmac.compare_digest(_firma(cuerpo), firma) or int(vence) < time.time():
+        return None
+    c = almacen.cuentas().get(usuario)
+    if not c or not c.get("activo", 1) or str(c.get("sesion", 0)) != version or c["hash"][:12] != h:
+        return None
+    if c.get("bloqueado_hasta", 0) > time.time():
+        return None
+    return {"usuario": c["usuario"], "nombre": c["nombre"], "rol": c["rol"], "debe_cambiar": bool(c.get("debe_cambiar")),
+            "sin_codigos": not any(not x["usado"] for x in c.get("codigos", []))}
+
+
+def cerrar_sesion(almacen, usuario):
+    """Anula todas las fichas de sesión de la persona (en todos los navegadores)."""
+    c = almacen.cuentas().get(usuario)
+    if c:
+        almacen.guardar_cuenta(c | {"sesion": int(c.get("sesion", 0)) + 1})

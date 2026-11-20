@@ -563,3 +563,52 @@ def test_instalacion_en_linea(tmp_path):
     b = AlmacenSQLite(tmp_path / "nube2.db", sincronizador=SincronizadorGitHub("apc/convocatorias-datos", "t", sesion=gh),
                       refresco_segundos=0, clave_cuentas=secreto, base_inicial=tmp_path / "semilla.db")
     assert len(b.items()) == 1 and "nata" in b.cuentas()
+
+
+
+def test_sesion_sobrevive_reconexion_y_se_anula(almacen):
+    U.crear(almacen, "ana", "Ana Pérez", "revisor", clave="Cafetal#Verde58", temporal=False)
+    ficha = U.emitir_sesion(almacen, "ana")
+    assert U.leer_sesion(almacen, ficha)["usuario"] == "ana"          # reconexión: entra sin contraseña
+    assert U.leer_sesion(almacen, ficha[:-1] + "0") is None           # ficha alterada
+    assert U.leer_sesion(almacen, U.emitir_sesion(almacen, "ana", horas=-1)) is None  # vencida
+    U.cambiar_clave(almacen, "ana", "Cafetal#Verde58", "Montaña#Azul73", "Montaña#Azul73")
+    assert U.leer_sesion(almacen, ficha) is None                       # cambiar la contraseña la anula
+    ficha = U.emitir_sesion(almacen, "ana")
+    U.cerrar_sesion(almacen, "ana")
+    assert U.leer_sesion(almacen, ficha) is None                       # cerrar sesión la anula
+
+
+# --- duplicados por año ----------------------------------------------------------
+def test_misma_convocatoria_otro_anio_es_nueva_edicion():
+    url = "https://www.daad.co/es/becas/epos"
+    e2026 = {"Nombre de la Convocatoria": "Becas EPOS 2026 (EPOS Scholarships)", "Cómo aplicar": url,
+             "Fecha Límite de Aplicación": "15/9/2026", "¿La convocatoria es permanente?": "No"}
+    e2027 = e2026 | {"Nombre de la Convocatoria": "Becas EPOS 2027 (EPOS Scholarships)", "Fecha Límite de Aplicación": "15/9/2027"}
+    assert R.buscar_duplicado(e2027, [e2026])[0] == "edicion_anterior"
+    assert R.buscar_duplicado(e2026 | {"Nombre de la Convocatoria": "Otra forma de llamarla"}, [e2026])[0] == "mismo_año"
+    assert R.buscar_duplicado(e2027 | {"Cómo aplicar": "https://otra.org/x"}, [e2027 | {"Cómo aplicar": "https://x.org/y"}])[0] == "nombre_mismo_año"
+    # en la validación: otro año no es error; el mismo año sí
+    _, h = R.validar(valida(**{"Cómo aplicar": url, "Fecha Límite de Aplicación": "1/3/2027"}), base=[e2026 | {"Fecha Límite de Aplicación": "1/3/2026"}], hoy=HOY)
+    assert not [x for x in h if x.regla == "R16"]
+    _, h = R.validar(valida(**{"Cómo aplicar": url, "Fecha Límite de Aplicación": "1/3/2027"}), base=[e2026 | {"Fecha Límite de Aplicación": "20/2/2027"}], hoy=HOY)
+    assert any(x.regla == "R16" and x.nivel == "Error" for x in h)
+    # una permanente es la misma mientras siga abierta
+    p = {"Nombre de la Convocatoria": "Fondo permanente", "Cómo aplicar": "https://f.org/p", "¿La convocatoria es permanente?": "Si"}
+    assert R.buscar_duplicado(p | {"Fecha de Registro": "1/2/2027"}, [p | {"Fecha de Registro": "1/2/2026"}])[0] == "mismo_año"
+
+
+
+def test_descartar_varias_en_una_sola_version(tmp_path):
+    from bandeja.almacen import SincronizadorGitHub
+    gh = GitHubFalso()
+    a = AlmacenSQLite(tmp_path / "x.db", sincronizador=SincronizadorGitHub("apc/convocatorias-datos", "t", sesion=gh),
+                      refresco_segundos=0)
+    items = [F.ingresar(a, valida(**{"Nombre de la Convocatoria": f"Beca {n} (Scholarship {n})",
+                                    "Cómo aplicar": f"https://www.fundacioncarolina.es/beca-{n}"}), "Registro manual", "N", hoy=HOY)[0]
+             for n in range(5)]
+    antes = gh.commits
+    assert F.descartar_varias(a, items, "Natalia", "Ya cerró") == 5
+    assert gh.commits == antes + 1
+    assert len(a.items("Descartada")) == 5 and a.items("Descartada")[0]["observacion"] == "Ya cerró"
+    assert F.pendientes(a.items("Descartada")[0]) is not None

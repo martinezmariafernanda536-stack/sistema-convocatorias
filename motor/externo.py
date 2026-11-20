@@ -317,7 +317,10 @@ def verificar(candidatos, cfg, lector, icetex, duplicados, catalogo, dominios_fu
             datos["titulo"] = nombre
         elig = reglas.elegibilidad(datos["texto_norm"], cfg)
         en_icetex = icetex.revisar(datos["titulo"], r.url, datos) if datos["modalidad"] == "Beca" else (False, "No aplica (no es beca)")
-        dup = duplicados.revisar(datos["titulo"], r.url)
+        dup = duplicados.revisar(datos["titulo"], r.url, {
+            "¿La convocatoria es permanente?": "Si" if datos.get("permanente") else "No",
+            "Fecha Límite de Aplicación": f"{datos['cierre'].day}/{datos['cierre'].month}/{datos['cierre'].year}" if datos.get("cierre") else "",
+            "Fecha de Registro": f"{hoy.day}/{hoy.month}/{hoy.year}"})
         fila = salidas.fila_airtable(datos, r.url, fuente, "Búsqueda externa con Gemini", cfg, elig, en_icetex, dup, hoy)
         catalogos = getattr(cfg, "_catalogos", {}) or {}
         usados = completar(fila, c, catalogos, cfg, datos["texto_norm"], datos["modalidad"], hoy)
@@ -409,7 +412,7 @@ def leer_objeto(texto):
         raise ErrorGemini(f"El JSON de Gemini no es válido: {e}") from e
 
 
-def completar_mapeo(filas, cfg, catalogos, hoy, clave=None, modelo=None):
+def completar_mapeo(filas, cfg, catalogos, hoy, clave=None, modelo=None, maximo=None):
     """Completa con Gemini las convocatorias encontradas por el mapeo, leyendo su página. Devuelve cuántas completó."""
     import time
     from . import texto as tx
@@ -421,10 +424,11 @@ def completar_mapeo(filas, cfg, catalogos, hoy, clave=None, modelo=None):
         return 0
     modelo = modelo or os.environ.get("GEMINI_MODEL") or str(cfg.p("Modelo de Gemini", MODELO_POR_DEFECTO) or MODELO_POR_DEFECTO)
     pausa = float(cfg.p("Pausa entre consultas a Gemini (segundos)", 5) or 0)
-    maximo = int(cfg.p("Máximo de convocatorias a completar con Gemini por corrida", 80) or 0)
+    if maximo is None:
+        maximo = int(cfg.p("Máximo de convocatorias a completar con Gemini por corrida", 80) or 0)
     pendientes = [f for f in filas if f.get("_texto") and f.get("[Sistema] Estado") != "Sin cambios"][:maximo]
     if pendientes:
-        log.info("Completando %d convocatorias con Gemini (%s), leyendo su página…", len(pendientes), modelo)
+        log.info("  Completando %d convocatorias con Gemini (%s)…", len(pendientes), modelo)
     hechas = 0
     for i, fila in enumerate(pendientes):
         try:

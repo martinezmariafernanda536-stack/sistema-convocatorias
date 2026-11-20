@@ -294,3 +294,35 @@ def test_la_busqueda_no_usa_criterios_de_socializacion():
     for p in (externo.construir_prompt(CATALOGOS, ["Subvención"], date(2026, 11, 10)),
               externo.prompt_completar("texto", "t", "u", CATALOGOS, "Subvención")):
         assert "50.000" not in p and "50000" not in p and "prioriz" not in p.lower()
+
+
+def test_ejecucion_en_segundo_plano(entorno, tmp_path):
+    """El mapeo corre en un hilo del servidor y guarda el avance en la base aunque nadie esté mirando."""
+    import json
+    import tareas
+    from bandeja.almacen import AlmacenSQLite
+    A = AlmacenSQLite(tmp_path / "servidor.db")
+    assert tareas.iniciar(A, "mapear", "Buscando convocatorias", ["--prueba", str(PAGINAS), "--hoy", HOY],
+                          "Natalia", Path(entorno).read_bytes())
+    tareas.actual().hilo.join(120)
+    t = tareas.actual()
+    assert t.estado == "Terminada", t.lineas[-5:]
+    assert A.items("Por revisar")  # llegó a la bandeja de la base compartida
+    assert A.leer_archivo("ultimo_mapeo.xlsx") and A.leer_archivo("historial_mapeo.json")
+    assert json.loads(A.leer_archivo("tarea_actual.json"))["estado"] == "Terminada"
+    assert tareas.interrumpida(A) is None
+    # si el servidor se reinicia a mitad de camino, la página lo avisa
+    A.guardar_archivo("tarea_actual.json", json.dumps({"estado": "En curso", "etiqueta": "Validando fuentes"}).encode())
+    assert tareas.interrumpida(A)["etiqueta"] == "Validando fuentes"
+
+
+def test_mapeo_admite_nueva_edicion_de_otro_anio():
+    """Una convocatoria con el mismo enlace pero de otro año no se descarta: es una nueva edición."""
+    from motor.reglas import IndiceAirtable
+    base = pd.DataFrame([{"Nombre de la Convocatoria": "Utrecht Excellence Scholarships",
+                          "Cómo aplicar": "https://www.uu.nl/en/masters/scholarships/utrecht-excellence-scholarships",
+                          "Fecha Límite de Aplicación": "1/2/2026", "¿La convocatoria es permanente?": "No"}])
+    idx = IndiceAirtable(base)
+    url = "https://www.uu.nl/en/masters/scholarships/utrecht-excellence-scholarships"
+    assert idx.revisar("Utrecht Excellence Scholarships", url, {"Fecha Límite de Aplicación": "1/2/2027"}).startswith("Nueva edición")
+    assert idx.revisar("Utrecht Excellence Scholarships", url, {"Fecha Límite de Aplicación": "15/1/2026"}).startswith("Ya está en la base")

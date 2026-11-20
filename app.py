@@ -41,9 +41,13 @@ def pantalla_configuracion(error=None):
             lineas.append(f'USUARIOS_CLAVE = "{usuarios}"')
         if not os.environ.get("CLAVE_INSTALACION"):
             lineas.append(f'CLAVE_INSTALACION = "{instal}"')
+        if not os.environ.get("GEMINI_API_KEY"):
+            lineas.append('GEMINI_API_KEY = "pega-aquí-tu-clave-de-gemini"')
         st.code("\n".join(lineas), language="toml")
         st.markdown("- **GITHUB_DATA_REPO:** tu usuario de GitHub / el repositorio de datos.\n"
                     "- **GITHUB_TOKEN:** token de GitHub con permiso *Contents: Read and write* solo sobre ese repositorio.\n"
+                    "- **GEMINI_API_KEY:** clave gratuita de aistudio.google.com (*Get API key → Create API key*). Activa la "
+                    "búsqueda con Gemini y el completado automático de campos. Si aún no la tienes, borra esa línea.\n"
                     "- **USUARIOS_CLAVE** y **CLAVE_INSTALACION:** ya vienen generadas. **Guárdalas también en un lugar seguro**: "
                     "la clave de instalación sirve para crear el primer administrador y para recuperar el acceso de un administrador.")
 
@@ -85,6 +89,8 @@ def pantalla_ingreso():
             u, mensaje = U.verificar(ui.almacen(), usuario, clave)
             if u:
                 st.session_state["usuario"] = u
+                st.session_state["ficha"] = U.emitir_sesion(ui.almacen(), u["usuario"])
+                st.query_params["s"] = st.session_state["ficha"]
                 st.rerun()
             st.error(mensaje)
         with st.expander("¿Olvidaste tu contraseña?"):
@@ -141,6 +147,7 @@ def pantalla_cambio_obligatorio(yo):
                 U.cambiar_clave(ui.almacen(), yo["usuario"], actual, nueva, nueva2)
                 yo["debe_cambiar"] = False
                 st.session_state["usuario"] = yo
+                st.session_state["ficha"] = U.emitir_sesion(ui.almacen(), yo["usuario"])
                 st.rerun()
             except (U.ErrorClave, ValueError) as e:
                 st.error(str(e))
@@ -193,9 +200,17 @@ if not _hay_cuentas:
     pantalla_primer_administrador()
     st.stop()
 
+if not ui.usuario() and st.query_params.get("s"):
+    _u = U.leer_sesion(ui.almacen(), st.query_params.get("s"))  # se cortó la conexión o la app se reinició
+    if _u:
+        st.session_state["usuario"], st.session_state["ficha"] = _u, st.query_params.get("s")
+    else:
+        del st.query_params["s"]
 if not ui.usuario():
     pantalla_ingreso()
     st.stop()
+if st.session_state.get("ficha") and st.query_params.get("s") != st.session_state["ficha"]:
+    st.query_params["s"] = st.session_state["ficha"]  # se conserva al cambiar de página
 if ui.usuario().get("debe_cambiar"):
     pantalla_cambio_obligatorio(ui.usuario())
     st.stop()
@@ -205,7 +220,8 @@ if ui.usuario().get("sin_codigos"):
 
 yo = ui.usuario()
 paginas = [
-    st.Page("paginas/tablero.py", title="Dashboard e informes", icon=":material/bar_chart:", default=True),
+    st.Page("paginas/inicio.py", title="Inicio", icon=":material/home:", default=True),
+    st.Page("paginas/tablero.py", title="Dashboard e informes", icon=":material/bar_chart:"),
     st.Page("paginas/bandeja.py", title="Bandeja de revisión", icon=":material/fact_check:"),
     st.Page("paginas/base.py", title="Base y calidad", icon=":material/database:"),
     st.Page("paginas/mapeo.py", title="Mapeo automático", icon=":material/travel_explore:"),
@@ -217,7 +233,9 @@ paginas.append(st.Page("paginas/cuenta.py", title="Mi cuenta", icon=":material/l
 with st.sidebar:
     st.markdown(f"**{yo['nombre']}** · {yo['rol']}")
     if st.button("Cerrar sesión"):
+        U.cerrar_sesion(ui.almacen(), yo["usuario"])
         st.session_state.clear()
+        st.query_params.clear()
         st.rerun()
 
 st.navigation(paginas).run()

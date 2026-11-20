@@ -3,12 +3,14 @@ import json
 import logging
 import os
 import tempfile
+import time
 from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
+import tareas
 import ui
 
 RAIZ = Path(__file__).resolve().parents[1]
@@ -27,61 +29,48 @@ def config_bytes():
     return A.leer_archivo(CFG) or (RAIZ / "config" / CFG).read_bytes()
 
 
-def preparar():
-    tmp = Path(tempfile.mkdtemp())
-    (tmp / CFG).write_bytes(config_bytes())
-    hist = A.leer_archivo("historial_mapeo.json")
-    if hist:
-        (tmp / "historial.json").write_bytes(hist)
-    os.environ["MAPEO_HISTORIAL"] = str(tmp / "historial.json")
-    return tmp
-
-
-class AlEstado(logging.Handler):
-    def __init__(self, caja, lineas):
-        super().__init__()
-        self.caja, self.lineas = caja, lineas
-
-    def emit(self, record):
-        msg = record.getMessage()
-        self.lineas.append(msg)
-        self.caja.write(msg)
-
-
 def ejecutar(comando, etiqueta, extra=()):
-    import mapeo as programa
-    tmp = preparar()
-    lineas = []
-    with st.status(etiqueta, expanded=True) as caja:
-        manejador = AlEstado(caja, lineas)
-        log = logging.getLogger("mapeo")
-        log.addHandler(manejador)
-        log.setLevel(logging.INFO)
-        try:
-            resultado = programa.main([comando, "--config", str(tmp / CFG), *extra])
-            caja.update(label=f"{etiqueta}: terminado", state="complete")
-        except SystemExit as e:
-            caja.update(label=f"{etiqueta}: detenido ({e})", state="error")
-            resultado = None
-        except Exception as e:  # noqa: BLE001 - se muestra el error a quien ejecuta
-            caja.update(label=f"{etiqueta}: error", state="error")
-            st.exception(e)
-            resultado = None
-        finally:
-            log.removeHandler(manejador)
-    if (tmp / "historial.json").exists():
-        A.guardar_archivo("historial_mapeo.json", (tmp / "historial.json").read_bytes())
-    if comando == "validar-fuentes":
-        A.guardar_archivo(CFG, (tmp / CFG).read_bytes())
-    registro = {"fecha": datetime.now().strftime("%Y-%m-%d %H:%M"), "usuario": YO["nombre"], "comando": comando,
-                "log": lineas[-60:]}
-    A.guardar_archivo(f"ultimo_{comando}.json", json.dumps(registro, ensure_ascii=False).encode("utf-8"))
-    if resultado and Path(resultado).exists() and str(resultado).endswith(".xlsx") and comando == "mapear":
-        A.guardar_archivo("ultimo_mapeo.xlsx", Path(resultado).read_bytes())
-    if resultado and Path(resultado).exists() and comando == "buscar-externo":
-        A.guardar_archivo("ultima_busqueda_externa.xlsx", Path(resultado).read_bytes())
-    st.cache_data.clear()
+    """Arranca la ejecución en el servidor, en segundo plano: sigue aunque se cierre la pestaña."""
+    if tareas.iniciar(A, comando, etiqueta, extra, YO["nombre"], config_bytes()):
+        st.toast(f"{etiqueta}: empezó en segundo plano.")
+    else:
+        st.warning("Ya hay una ejecución en curso. Espera a que termine o detenla.")
+    st.rerun()
 
+
+@st.fragment(run_every=5)
+def panel_ejecucion():
+    t = tareas.actual()
+    if tareas.en_curso():
+        with st.container(border=True):
+            c1, c2 = st.columns([4, 1])
+            c1.markdown(f"**⏳ {t.etiqueta}** · en curso desde hace {t.minutos()} min · la inició {t.usuario}")
+            if c2.button("Detener", key="detener", width="stretch"):
+                tareas.detener()
+            st.caption("Corre en el servidor: puedes cerrar esta pestaña o seguir trabajando en otras páginas. "
+                       "Lo encontrado va llegando a la bandeja fuente por fuente: en Bandeja de revisión → Por revisar, "
+                       "filtra el origen «Mapeo automático».")
+            st.code("\n".join(t.lineas[-15:]) or "Empezando…", language=None)
+    elif t is not None and t.fin and time.time() - t.fin < 900:
+        icono = {"Terminada": "✅", "Detenida": "⏹️", "Error": "⚠️"}.get(t.estado, "")
+        with st.container(border=True):
+            st.markdown(f"**{icono} {t.etiqueta}: {t.estado.lower()}** en {t.minutos()} min.")
+            if t.estado == "Error":
+                st.code("\n".join(t.lineas[-8:]), language=None)
+            c1, c2 = st.columns(2)
+            if t.comando in ("mapear", "buscar-externo"):
+                c1.page_link("paginas/bandeja.py", label="Revisar lo encontrado en la bandeja →")
+            if c2.button("Ver resultados aquí", key="ver_res"):
+                st.rerun(scope="app")
+
+
+interrumpida = tareas.interrumpida(A)
+if interrumpida:
+    st.warning(f"La ejecución «{interrumpida.get('etiqueta', '')}» del {interrumpida.get('inicio', '')} se interrumpió porque el "
+               "servidor se reinició. Lo que alcanzó a encontrar ya está en la bandeja. Puedes volver a ejecutarla: no repite "
+               "lo que ya está en el sistema.")
+panel_ejecucion()
+OCUPADO = tareas.en_curso()
 
 # --- fuentes -------------------------------------------------------------------
 tmp_cfg = Path(tempfile.mkdtemp()) / CFG
@@ -107,7 +96,8 @@ elegidos = st.multiselect("Qué fuentes revisar", grupos, default=grupos,
                                "Se puede ejecutar por grupos: por ejemplo, un grupo cada día.")
 n_sel = activas["Grupo"].isin(elegidos).sum()
 minutos = max(1, round(n_sel * 1.5 / 6))
-st.caption(f"{n_sel} fuentes seleccionadas · tiempo estimado: unos {minutos} minutos (6 fuentes a la vez, 3 segundos entre páginas del mismo sitio).")
+st.caption(f"{n_sel} fuentes seleccionadas · tiempo estimado: unos {minutos} minutos. Corre en segundo plano en el servidor: "
+           "puedes cerrar la pestaña y volver después.")
 extra = [] if set(elegidos) == set(grupos) else [x for g in elegidos for x in ("--grupo", g)]
 
 c1, c2 = st.columns(2)
@@ -115,14 +105,13 @@ with c1:
     st.markdown("#### 1. Validar fuentes")
     st.write("Comprueba que cada sitio responda, que no redirija a otro dominio, que se identifique con el nombre del oferente "
              "y encuentra su página de convocatorias. Hazlo la primera vez y una vez al mes.")
-    if st.button("Validar fuentes", width="stretch", disabled=not elegidos):
+    if st.button("Validar fuentes", width="stretch", disabled=not elegidos or OCUPADO):
         ejecutar("validar-fuentes", "Validando fuentes", extra)
-        st.rerun()
 with c2:
     st.markdown("#### 2. Ejecutar el mapeo")
     st.write("Revisa las fuentes seleccionadas buscando becas, subvenciones, cooperación técnica y premios, "
              "y deja en la bandeja lo nuevo o actualizado.")
-    if st.button("Ejecutar mapeo ahora", type="primary", width="stretch", disabled=not elegidos):
+    if st.button("Ejecutar mapeo ahora", type="primary", width="stretch", disabled=not elegidos or OCUPADO):
         ejecutar("mapear", "Buscando convocatorias", extra)
 
 # --- búsqueda externa con Gemini ---------------------------------------------------
@@ -141,7 +130,7 @@ if clave:
     tema = g2.text_input("Tema (opcional)", placeholder="Ej.: cambio climático, paz, salud")
     region = g2.text_input("País o región del oferente (opcional)", placeholder="Ej.: Unión Europea, Japón")
     maximo = g3.number_input("Convocatorias a pedir", 3, 20, 10)
-    if st.button("Buscar con Gemini", disabled=not mods):
+    if st.button("Buscar con Gemini", disabled=not mods or OCUPADO):
         extra_g = [x for m in mods for x in ("--modalidad", m)] + ["--maximo", str(maximo)]
         if tema:
             extra_g += ["--tema", tema]

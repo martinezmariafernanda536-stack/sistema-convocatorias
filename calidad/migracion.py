@@ -179,19 +179,16 @@ def importar(df_crudo, almacen, hoy=None, todo_a_revision=False):
             catalogo.agregar(a)
             nuevos_actores.append(a)
     existentes = almacen.items()
-    urls = {str(i["datos"].get("Cómo aplicar", "")).rstrip("/").lower() for i in existentes} - {""}
-    nombres = [i["datos"].get("Nombre de la Convocatoria", "") for i in existentes]
+    vistos = [i["datos"] for i in existentes]
     base = [i["datos"] for i in existentes]
     items, resultado = [], []
     for reg in df.to_dict("records"):
         nombre = str(reg.get("Nombre de la Convocatoria", "")).strip()
-        url = str(reg.get("Cómo aplicar") or "").strip().rstrip("/").lower()
-        if url.startswith("http") and url in urls:
-            resultado.append((nombre, "Ya estaba en el sistema", "Mismo enlace"))
-            continue
-        parecido = next((n for n in nombres if R.similitud(nombre, n) >= 95), None)
-        if parecido:
-            resultado.append((nombre, "Ya estaba en el sistema", f"Nombre igual o casi igual a «{parecido}»"))
+        limpio = {k: ("" if (isinstance(v, float) and v != v) else v) for k, v in reg.items()}
+        tipo, otro = R.buscar_duplicado(limpio, vistos, 95)
+        if tipo in ("mismo_año", "nombre_mismo_año"):
+            motivo = "Mismo enlace" if tipo == "mismo_año" else f"Nombre igual o casi igual a «{otro.get('Nombre de la Convocatoria', '')}»"
+            resultado.append((nombre, "Ya estaba en el sistema", f"{motivo} ({R.describir_periodo(otro)})"))
             continue
         datos, cambios, pendientes = corregir(reg, catalogo, base, hoy)
         datos = {k: ("" if (isinstance(v, float) and v != v) else v) for k, v in datos.items()}
@@ -200,10 +197,10 @@ def importar(df_crudo, almacen, hoy=None, todo_a_revision=False):
         item["historial"] = [{"fecha": item["ingreso"], "usuario": "Importación", "accion": "Importada desde Airtable",
                               "detalle": f"{len(cambios)} correcciones automáticas"}]
         items.append(item)
-        urls.add(url)
-        nombres.append(nombre)
+        vistos.append(datos)
         resultado.append((nombre, "Agregada a la base" if estado == "Aprobada" else "Enviada a la bandeja de revisión",
-                          f"{len(cambios)} correcciones automáticas, {len(pendientes)} pendientes"))
+                          f"{len(cambios)} correcciones automáticas, {len(pendientes)} pendientes"
+                          + (f" · nueva edición (ya estaba la de {R.describir_periodo(otro)})" if tipo == "edicion_anterior" else "")))
     for a in nuevos_actores:
         almacen.guardar_actor(a)
     if items:

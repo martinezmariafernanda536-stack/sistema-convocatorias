@@ -41,31 +41,87 @@ for col, (v, lab) in zip(k, [(len(aprobadas), "convocatorias en la base"), (len(
     col.markdown(f"<div class='kpi'><div class='v'>{v}</div><div class='l'>{lab}</div></div>", unsafe_allow_html=True)
 st.write("")
 
-c1, c2, c3 = st.columns([1.2, 1, 1.6])
-vista = c1.radio("Mostrar", ["Con errores", "Con alertas", "Todas"], horizontal=True)
-reglas_presentes = sorted({p["regla"] for i in aprobadas for p in i["meta"].get("pendientes", [])})
-regla = c2.selectbox("Regla", ["Todas"] + reglas_presentes, format_func=lambda r: r if r == "Todas" else f"{r} · {R.REGLAS.get(r, '')}")
-buscar = c3.text_input("Buscar por nombre o actor")
+# --- resumen por tipo de pendiente: al marcar uno se filtra la tabla -------------------
+conteo = {}
+for i in aprobadas:
+    for p in i["meta"].get("pendientes", []):
+        c = conteo.setdefault(p["regla"], {"Error": set(), "Alerta": set()})
+        c[p["nivel"]].add(i["id"])
+resumen = pd.DataFrame([{"Regla": r, "Qué revisa": R.REGLAS.get(r, ""), "Con error": len(c["Error"]), "Con alerta": len(c["Alerta"] - c["Error"])}
+                        for r, c in sorted(conteo.items(), key=lambda x: -(len(x[1]["Error"]) * 100 + len(x[1]["Alerta"])))])
+regla = None
+if len(resumen):
+    st.markdown("#### Qué falta por corregir")
+    st.caption("Marca un tipo de pendiente para ver solo las convocatorias que lo tienen.")
+    ev_r = st.dataframe(resumen, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row",
+                        key="sel_regla", height=min(320, 38 + 35 * len(resumen)),
+                        column_config={"Qué revisa": st.column_config.TextColumn(width="large")})
+    if ev_r and ev_r.selection.rows:
+        regla = resumen.iloc[ev_r.selection.rows[0]]["Regla"]
 
-lista = {"Con errores": con_err, "Con alertas": con_ale, "Todas": aprobadas}[vista]
-if regla != "Todas":
-    lista = [i for i in lista if any(p["regla"] == regla for p in i["meta"].get("pendientes", []))]
+# --- filtros y tabla --------------------------------------------------------------------
+def _anio(d):
+    p = R.periodo(d)
+    return "Permanente" if p[0] == "permanente" else str(p[1] or "Sin fecha")
+
+
+filas = [{"id": i["id"], "Convocatoria": i["datos"].get("Nombre de la Convocatoria", ""), "Actor": i["datos"].get("Nombre de la Fuente", ""),
+          "Año": _anio(i["datos"]), "Modalidad": R.modalidad_corta(i["datos"].get("Modalidad")),
+          "Carácter": i["datos"].get("Oficial / No Oficial", ""), "Errores": n_pend(i, "Error"), "Alertas": n_pend(i, "Alerta"),
+          "Reglas": ", ".join(sorted({p["regla"] for p in i["meta"].get("pendientes", [])})),
+          "Página": i["datos"].get("Cómo aplicar") if str(i["datos"].get("Cómo aplicar", "")).startswith("http") else None}
+         for i in aprobadas]
+tabla = pd.DataFrame(filas)
+c1, c2, c3, c4 = st.columns([1.3, 1, 1.1, 1.6])
+vista = c1.radio("Mostrar", ["Con errores", "Con alertas", "Todas"], horizontal=True, index=2 if regla else 0)
+anios = c2.multiselect("Año", sorted(tabla["Año"].unique(), reverse=True), placeholder="Todos")
+mods = c3.multiselect("Modalidad", sorted(tabla["Modalidad"].unique()), placeholder="Todas")
+buscar = c4.text_input("Buscar por nombre o actor")
+v = tabla
+if vista == "Con errores":
+    v = v[v["Errores"] > 0]
+elif vista == "Con alertas":
+    v = v[(v["Alertas"] > 0) & (v["Errores"] == 0)]
+if regla:
+    v = v[v["Reglas"].str.contains(regla, regex=False)]
+    st.info(f"Filtrando por **{regla}** · {R.REGLAS.get(regla, '')}. Desmarca la fila del resumen para quitar el filtro.")
+if anios:
+    v = v[v["Año"].isin(anios)]
+if mods:
+    v = v[v["Modalidad"].isin(mods)]
 if buscar:
     b = buscar.lower()
-    lista = [i for i in lista if b in i["datos"].get("Nombre de la Convocatoria", "").lower()
-             or b in i["datos"].get("Nombre de la Fuente", "").lower()]
+    v = v[v["Convocatoria"].str.lower().str.contains(b, regex=False) | v["Actor"].str.lower().str.contains(b, regex=False)]
+v = v.sort_values(["Errores", "Alertas"], ascending=False)
+st.caption(f"{len(v)} de {len(tabla)} convocatorias · marca una fila para corregirla; marca varias para retirarlas juntas.")
+ev = st.dataframe(v.drop(columns="id"), hide_index=True, width="stretch", on_select="rerun", selection_mode="multi-row",
+                  key="sel_base", height=min(420, 38 + 35 * max(len(v), 1)),
+                  column_config={"Página": st.column_config.LinkColumn(display_text="Abrir ↗"),
+                                 "Convocatoria": st.column_config.TextColumn(width="large")})
+ids = [v.iloc[n]["id"] for n in (ev.selection.rows if ev else []) if n < len(v)]
 
-tabla = pd.DataFrame([{
-    "Convocatoria": i["datos"].get("Nombre de la Convocatoria", ""), "Actor": i["datos"].get("Nombre de la Fuente", ""),
-    "Carácter": i["datos"].get("Oficial / No Oficial", ""), "Modalidad": i["datos"].get("Modalidad", ""),
-    "Registro": i["datos"].get("Fecha de Registro", ""), "Errores": n_pend(i, "Error"), "Alertas": n_pend(i, "Alerta"),
-    "Origen": i["origen"]} for i in lista])
-st.dataframe(tabla, hide_index=True, width="stretch", height=280)
-
-if lista:
-    etiquetas = {i["id"]: f"{i['datos'].get('Nombre de la Convocatoria', '')[:95]}  ·  {n_pend(i, 'Error')} errores" for i in lista}
-    sel = st.selectbox("Abrir convocatoria", list(etiquetas), format_func=etiquetas.get)
-    item = next(i for i in lista if i["id"] == sel)
+if len(ids) > 1:
+    with st.container(border=True):
+        st.markdown(f"**{len(ids)} convocatorias seleccionadas**")
+        d1, d2 = st.columns([3, 1])
+        motivo = d1.text_input("Motivo para retirarlas de la base", placeholder="Ej.: duplicadas en el mismo año")
+        if d2.button("Retirar seleccionadas", type="primary", width="stretch"):
+            if not motivo.strip():
+                st.error("Escribe el motivo.")
+            else:
+                with A.lote(f"Retiradas {len(ids)} convocatorias de la base"):
+                    for item in [i for i in aprobadas if i["id"] in ids]:
+                        item["estado"], item["observacion"] = "Descartada", motivo
+                        item["historial"].append({"fecha": ahora(), "usuario": YO["nombre"], "accion": "Retirada de la base", "detalle": motivo})
+                        A.guardar_item(item)
+                st.session_state["aviso_base"] = f"{len(ids)} convocatorias retiradas de la base."
+                ui.recargar()
+elif len(v):
+    sel = ids[0] if ids else v.iloc[0]["id"]
+    if not ids:
+        st.caption("Mostrando la primera de la lista. Marca otra fila para cambiarla.")
+    item = next(i for i in aprobadas if i["id"] == sel)
+    st.markdown(f"### {item['datos'].get('Nombre de la Convocatoria', '')}")
     izq, der = st.columns([1.9, 1])
     with izq:
         datos = formulario(CTX, item["datos"], f"b_{item['id']}_")
@@ -75,28 +131,25 @@ if lista:
             st.link_button("Abrir la página oficial", enlace, width="stretch")
         st.markdown("#### Calidad del dato")
         norm, hallazgos = panel_validacion(CTX, datos, nuevo=False, excluir_id=item["id"])
-        if PUEDE_EDITAR:
-            if st.button("Guardar corrección", type="primary", width="stretch"):
-                item["datos"] = norm
-                item["meta"]["pendientes"] = [h.__dict__ for h in hallazgos if h.nivel in ("Error", "Alerta") and h.regla != "R07"]
-                item["historial"].append({"fecha": ahora(), "usuario": YO["nombre"], "accion": "Corrección en la base",
-                                          "detalle": f"Quedan {n_pend(item, 'Error')} errores y {n_pend(item, 'Alerta')} alertas"})
-                A.guardar_item(item)
-                st.session_state["aviso_base"] = "Corrección guardada."
-                ui.recargar()
-            with st.expander("Retirar de la base (duplicada o no válida)"):
-                motivo = st.text_area("Motivo", key="ret_" + item["id"])
-                if st.button("Retirar", key="retb_" + item["id"]):
-                    if not motivo.strip():
-                        st.error("Escribe el motivo.")
-                    else:
-                        item["estado"] = "Descartada"
-                        item["observacion"] = motivo
-                        item["historial"].append({"fecha": ahora(), "usuario": YO["nombre"], "accion": "Retirada de la base", "detalle": motivo})
-                        A.guardar_item(item)
-                        ui.recargar()
-        else:
-            st.info("Tu rol permite consultar. Las correcciones las hace un revisor.")
+        if st.button("Guardar corrección", type="primary", width="stretch"):
+            item["datos"] = norm
+            item["meta"]["pendientes"] = [h.__dict__ for h in hallazgos if h.nivel in ("Error", "Alerta") and h.regla != "R07"]
+            item["historial"].append({"fecha": ahora(), "usuario": YO["nombre"], "accion": "Corrección en la base",
+                                      "detalle": f"Quedan {n_pend(item, 'Error')} errores y {n_pend(item, 'Alerta')} alertas"})
+            A.guardar_item(item)
+            st.session_state["aviso_base"] = "Corrección guardada."
+            ui.recargar()
+        with st.expander("Retirar de la base (duplicada o no válida)"):
+            motivo = st.text_area("Motivo", key="ret_" + item["id"])
+            if st.button("Retirar", key="retb_" + item["id"]):
+                if not motivo.strip():
+                    st.error("Escribe el motivo.")
+                else:
+                    item["estado"] = "Descartada"
+                    item["observacion"] = motivo
+                    item["historial"].append({"fecha": ahora(), "usuario": YO["nombre"], "accion": "Retirada de la base", "detalle": motivo})
+                    A.guardar_item(item)
+                    ui.recargar()
         with st.expander("Historial y correcciones automáticas"):
             for h in item["historial"]:
                 st.markdown(f"- {h['fecha']} · {h['usuario']}: {h['accion']} {('· ' + h['detalle']) if h.get('detalle') else ''}")
@@ -104,6 +157,8 @@ if lista:
             if cambios:
                 st.markdown("**Corregido automáticamente al migrar:**")
                 st.dataframe(pd.DataFrame(cambios), hide_index=True, width="stretch")
+else:
+    st.info("Ninguna convocatoria cumple los filtros.")
 if st.session_state.get("aviso_base"):
     st.success(st.session_state.pop("aviso_base"))
 

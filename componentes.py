@@ -215,7 +215,7 @@ def info_mapeo(item):
     m = item.get("meta", {})
     partes = [f"<b>Origen:</b> {item['origen']} · <b>Ingreso:</b> {item['ingreso']}"]
     for clave, etiqueta in (("elegibilidad", "Elegibilidad Colombia (automática)"), ("icetex", "ICETEX"),
-                            ("pagina", "Página donde se encontró"), ("nivel", "Nivel"),
+                            ("pagina", "Página donde se encontró"), ("nivel", "Nivel"), ("duplicado", "Duplicados"),
                             ("gemini", "Lo que propuso Gemini (confirmar en la página)")):
         if m.get(clave):
             partes.append(f"<b>{etiqueta}:</b> {m[clave]}")
