@@ -756,8 +756,18 @@ def externo_reiniciar():
 
 
 # ---------------------------------------------------------------------------
+VERSION = "2026-11-20"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
+
+
+class _Argumentos(argparse.ArgumentParser):
+    def error(self, message):
+        raise SystemExit("La búsqueda no arrancó: el programa no reconoce una opción (" + message + "). Casi siempre es "
+                         "porque en GitHub quedaron archivos de versiones distintas: vuelve a subir mapeo.py y las "
+                         "carpetas motor/, calidad/ y paginas/ del último paquete.")
+
+
 def main(argv=None):
-    p = argparse.ArgumentParser(description="Mapeo de convocatorias internacionales para Colombia")
+    p = _Argumentos(description="Mapeo de convocatorias internacionales para Colombia")
     p.add_argument("comando", choices=["migrar", "importar", "publicar-base", "crear-usuario", "restablecer-clave", "generar-clave-cuentas", "validar-fuentes", "mapear", "buscar-externo", "completar-pendientes", "informe", "auditar"])
     p.add_argument("archivo", nargs="?", help="Export CSV (para migrar, auditar o informe desde un archivo)")
     p.add_argument("--config", default=str(cfgmod.RUTA_CONFIG))

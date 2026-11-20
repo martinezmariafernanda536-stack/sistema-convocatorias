@@ -88,6 +88,34 @@ def iniciar(almacen, comando, etiqueta, extra, usuario, config):
         return True
 
 
+MODULOS = ["mapeo", "motor.extraer", "motor.externo", "motor.reglas", "motor.salidas", "calidad.reglas", "calidad.entrada",
+           "bandeja.flujo", "tareas"]
+
+
+def modulos_desactualizados():
+    """Módulos que el servidor tiene cargados en una versión anterior a la de los archivos (pasa cuando se suben archivos
+    nuevos sin reiniciar la app): el archivo define funciones que el módulo en memoria no tiene."""
+    import importlib
+    import re as _re
+    import sys
+    viejos = []
+    for nombre in MODULOS:
+        m = sys.modules.get(nombre)
+        if m is None:
+            try:
+                m = importlib.import_module(nombre)
+            except Exception:  # noqa: BLE001
+                continue
+        try:
+            fuente = Path(m.__file__).read_text(encoding="utf-8")
+        except (OSError, TypeError):
+            continue
+        definidas = set(_re.findall(r"^(?:def|class) (\w+)", fuente, _re.M)) | set(_re.findall(r"^([A-Z_]{3,}) = ", fuente, _re.M))
+        if any(not hasattr(m, n) for n in definidas):
+            viejos.append(nombre)
+    return viejos
+
+
 def detener():
     import mapeo as programa
     if en_curso():
@@ -119,11 +147,15 @@ def _correr(almacen, tarea, extra, config):
     _guardar_registro(almacen, tarea)
     resultado = None
     try:
+        viejos = modulos_desactualizados()
+        if viejos:
+            raise RuntimeError("El servidor sigue usando una versión anterior del programa (" + ", ".join(viejos) + "). "
+                               "Reinicia la aplicación: en share.streamlit.io, «Manage app» → menú ⋮ → «Reboot app».")
         resultado = programa.main([tarea.comando, "--config", str(tmp / CFG), *extra])
         tarea.estado = "Detenida" if programa.DETENER.is_set() else "Terminada"
     except SystemExit as e:
-        tarea.estado = "Detenida"
-        tarea.lineas.append(f"Detenida: {e}")
+        tarea.estado = "Detenida" if programa.DETENER.is_set() else "Error"
+        tarea.lineas.append(f"{'Detenida' if programa.DETENER.is_set() else 'Error'}: {e}")
     except Exception as e:  # noqa: BLE001 - se muestra el error en la página
         tarea.estado = "Error"
         tarea.lineas.append(f"Error: {e}")

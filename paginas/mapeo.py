@@ -59,6 +59,10 @@ def progreso(lineas):
 @st.fragment(run_every=5)
 def panel_ejecucion():
     t = tareas.actual()
+    if st.session_state.get("_seguia_en_curso") and not tareas.en_curso():
+        st.session_state["_seguia_en_curso"] = False
+        st.rerun(scope="app")  # terminó: se refresca toda la página (botones y listas), no solo este panel
+    st.session_state["_seguia_en_curso"] = tareas.en_curso()
     if tareas.en_curso():
         with st.container(border=True):
             c1, c2 = st.columns([4, 1])
@@ -84,11 +88,46 @@ def panel_ejecucion():
                         + (f" · **{enviadas} completas** enviadas a revisión · {pend} quedaron por completar"
                            if t.comando == "mapear" else "") + ".")
             if t.estado == "Error":
-                st.code("\n".join(t.lineas[-8:]), language=None)
+                st.error("La búsqueda se detuvo por un error. Esto es lo que pasó:")
+                st.code("\n".join(t.lineas[-8:]) or "(sin mensajes)", language=None)
+            elif t.estado == "Detenida":
+                st.caption("Alguien pulsó «Detener». Lo encontrado hasta ese momento ya está guardado.")
+            with st.expander("Ver detalle técnico"):
+                st.code("\n".join(t.lineas[-40:]) or "(sin mensajes)", language=None)
             if t.comando in ("mapear", "buscar-externo", "completar-pendientes"):
                 st.page_link("paginas/bandeja.py", label="Revisar lo que encontró", icon=":material/fact_check:")
 
 
+def revisar_version():
+    """Avisa si en el servidor quedaron archivos de versiones distintas (pasa al subirlos por partes)."""
+    faltan = []
+    try:
+        import mapeo as programa
+        if getattr(programa, "VERSION", "") < "2026-11-20":
+            faltan.append("mapeo.py")
+        from motor import extraer, externo
+        if not hasattr(extraer, "secciones"):
+            faltan.append("motor/extraer.py")
+        if not getattr(externo, "MODELO_POR_DEFECTO", "").startswith("gemini-3"):
+            faltan.append("motor/externo.py")
+        import importlib.util
+        if importlib.util.find_spec("calidad.entrada") is None:
+            faltan.append("calidad/entrada.py")
+    except Exception as e:  # noqa: BLE001
+        faltan.append(f"(no se pudo revisar: {e})")
+    viejos = tareas.modulos_desactualizados()
+    if viejos:
+        st.error("**El servidor sigue usando una versión anterior del programa**, aunque los archivos nuevos ya están en "
+                 "GitHub. Por eso las búsquedas y la validación se detienen sin hacer nada. **Reinicia la aplicación:** en "
+                 "share.streamlit.io, abre «Manage app» (abajo a la derecha de la app) → menú ⋮ → **Reboot app**. "
+                 f"(Módulos desactualizados: {', '.join(viejos)}.)")
+        return
+    if faltan:
+        st.error("**Faltan archivos por actualizar en GitHub:** " + ", ".join(faltan) + ". Mientras tanto la búsqueda "
+                 "puede detenerse sin encontrar nada. Súbelos del último paquete y vuelve a abrir la aplicación.")
+
+
+revisar_version()
 interrumpida = tareas.interrumpida(A)
 if interrumpida:
     st.warning(f"La búsqueda «{interrumpida.get('etiqueta', '')}» del {interrumpida.get('inicio', '')} se interrumpió porque el "
