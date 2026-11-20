@@ -22,7 +22,7 @@ def leer():
 
 
 items, catalogo = leer()
-por_estado = {e: [i for i in items if i["estado"] == e] for e in ("Por revisar", "Actor pendiente de crear", "Aprobada")}
+por_estado = {e: [i for i in items if i["estado"] == e] for e in ("Por revisar", "Actor pendiente de crear", "Aprobada", "Por completar")}
 
 
 def dias_para_cierre(d):
@@ -46,6 +46,26 @@ nombre = YO["nombre"].split()[0]
 st.title(f"Hola, {nombre}")
 st.caption(f"Lo que requiere atención hoy, {HOY.day}/{HOY.month}/{HOY.year}.")
 
+reg_mapeo = json.loads(A.leer_archivo("ultimo_mapear.json") or b"{}")
+if not tareas.en_curso():
+    if not reg_mapeo:
+        paso = ("**Tu primer paso:** ejecuta la primera búsqueda de convocatorias. Tarda un rato, pero puedes cerrar la pestaña.",
+                "paginas/mapeo.py", "Buscar convocatorias")
+    elif cierran:
+        paso = (f"**Tu siguiente paso:** revisa las **{len(cierran)}** convocatorias que cierran en los próximos 30 días.",
+                "paginas/bandeja.py", "Revisarlas ahora")
+    elif revisar:
+        paso = (f"**Tu siguiente paso:** hay **{len(revisar)}** convocatorias esperando revisión.",
+                "paginas/bandeja.py", "Revisarlas ahora")
+    else:
+        paso = ("**Todo al día.** Puedes ejecutar una nueva búsqueda o consultar el dashboard.", "paginas/mapeo.py",
+                "Buscar convocatorias")
+    with st.container(border=True):
+        a, b, c_ = st.columns([3.2, 1.1, 1])
+        a.markdown(paso[0])
+        b.page_link(paso[1], label=paso[2], icon=":material/arrow_forward:")
+        c_.page_link("paginas/guia.py", label="Cómo se usa", icon=":material/help:")
+
 if tareas.en_curso():
     t = tareas.actual()
     st.info(f"⏳ **{t.etiqueta}** en curso desde hace {t.minutos()} min (la inició {t.usuario}). "
@@ -63,18 +83,26 @@ def tarjeta(col, valor, texto, detalle, pagina, etiqueta, alerta=False):
 
 c = st.columns(4)
 tarjeta(c[0], len(revisar), "por revisar", f"{len(nuevas_7)} llegaron esta semana · {len(cierran)} cierran en 30 días",
-        "paginas/bandeja.py", "Ir a la bandeja", alerta=bool(cierran))
+        "paginas/bandeja.py", "Revisarlas", alerta=bool(cierran))
 tarjeta(c[1], len(actores_pend), "actores por crear en CICLOPE",
         f"{len(por_estado['Actor pendiente de crear'])} convocatorias esperan a que se creen",
         "paginas/bandeja.py", "Ver actores pendientes")
 tarjeta(c[2], len(base_err), "convocatorias de la base con errores", "Datos por corregir en la base revisada",
-        "paginas/base.py", "Corregir en Base y calidad", alerta=bool(base_err))
+        "paginas/base.py", "Corregir en la base", alerta=bool(base_err))
 tarjeta(c[3], len(abiertas), "convocatorias abiertas en la base", f"de {len(por_estado['Aprobada'])} en total",
         "paginas/tablero.py", "Ver dashboard e informes")
 
+if por_estado["Por completar"]:
+    q1, q2 = st.columns([4, 1.1])
+    q1.info(f"**{len(por_estado['Por completar'])} convocatorias encontradas esperan completarse** (no están en español o les "
+            "faltan datos). No llegan a la bandeja hasta quedar completas; el sistema las reintenta en cada búsqueda.")
+    q2.page_link("paginas/mapeo.py", label="Ver cuáles", icon=":material/arrow_forward:")
+
 if cerradas:
-    st.warning(f"**{len(cerradas)} convocatorias por revisar ya cerraron.** En la bandeja, filtra «Cierre → Ya cerró», "
-               "márcalas todas y descártalas de una vez con el motivo «Ya cerró».")
+    w1, w2 = st.columns([4, 1.1])
+    w1.warning(f"**{len(cerradas)} convocatorias por revisar ya cerraron.** En Revisar convocatorias pulsa «Mostrar las cerradas», "
+               "márcalas y descártalas de una vez con el motivo «Ya cerró».")
+    w2.page_link("paginas/bandeja.py", label="Ir a descartarlas", icon=":material/arrow_forward:")
 
 izq, der = st.columns([1.35, 1])
 with izq:
@@ -110,10 +138,10 @@ with der:
                         f"{R.modalidad_corta(d.get('Modalidad'))} · {origen} · {i['ingreso'][:10]}</span>", unsafe_allow_html=True)
         st.page_link("paginas/bandeja.py", label="Revisarlas", icon=":material/fact_check:")
     else:
-        st.write("Todavía no ha llegado nada del mapeo. Ejecútalo desde Mapeo automático.")
+        st.write("Todavía no ha llegado nada del mapeo. Ejecuta una búsqueda desde Buscar convocatorias.")
 
     st.markdown("#### Última búsqueda automática")
-    reg = json.loads(A.leer_archivo("ultimo_mapear.json") or b"{}")
+    reg = reg_mapeo
     if reg:
         st.write(f"{reg.get('fecha', '')} · {reg.get('usuario', '')} · {reg.get('estado', 'Terminada').lower()}")
         resumen = [l for l in reg.get("log", []) if "Listo:" in l or "enviadas a la bandeja" in l]
@@ -121,4 +149,4 @@ with der:
             st.caption(l[6:] if l[:2].isdigit() else l)
     else:
         st.write("Aún no se ha ejecutado.")
-    st.page_link("paginas/mapeo.py", label="Ir a Mapeo automático", icon=":material/travel_explore:")
+    st.page_link("paginas/mapeo.py", label="Ir a Buscar convocatorias", icon=":material/travel_explore:")

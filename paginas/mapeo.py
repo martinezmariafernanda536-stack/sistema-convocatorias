@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 from datetime import date, datetime
@@ -19,10 +20,9 @@ st.markdown(ui.ESTILOS, unsafe_allow_html=True)
 YO = ui.usuario()
 A = ui.almacen()
 
-st.title("Mapeo automático")
-st.caption("Busca becas, subvenciones, cooperación técnica y premios abiertos a Colombia en los sitios oficiales de los oferentes: "
-           "los actores de la base, gobiernos y agencias, organismos multilaterales, fundaciones, universidades y cámaras binacionales. "
-           "Lo que encuentra va a la bandeja de revisión; nunca entra directo a la base.")
+st.title("Buscar convocatorias")
+st.caption("El sistema revisa los sitios oficiales de los oferentes y trae becas, subvenciones, cooperación técnica y premios "
+           "abiertos a Colombia. Lo que encuentra llega a **Revisar convocatorias**; nunca entra directo a la base.")
 
 
 def config_bytes():
@@ -34,8 +34,26 @@ def ejecutar(comando, etiqueta, extra=()):
     if tareas.iniciar(A, comando, etiqueta, extra, YO["nombre"], config_bytes()):
         st.toast(f"{etiqueta}: empezó en segundo plano.")
     else:
-        st.warning("Ya hay una ejecución en curso. Espera a que termine o detenla.")
+        st.warning("Ya hay una búsqueda en curso. Espera a que termine o detenla.")
     st.rerun()
+
+
+_AVANCE = re.compile(r"\[(\d+) de (\d+)\]")
+_ENVIADAS = re.compile(r"a la bandeja (\d+)")
+_POR_COMPLETAR = re.compile(r"por completar (\d+)")
+
+
+def progreso(lineas):
+    """(hechas, total, enviadas a la bandeja, por completar) a partir del registro de la ejecución."""
+    hechas = total = enviadas = pendientes = 0
+    for l in lineas:
+        if m := _AVANCE.search(l):
+            hechas, total = int(m.group(1)), int(m.group(2))
+            if m := _ENVIADAS.search(l):
+                enviadas += int(m.group(1))
+            if m := _POR_COMPLETAR.search(l):
+                pendientes += int(m.group(1))
+    return hechas, total, enviadas, pendientes
 
 
 @st.fragment(run_every=5)
@@ -44,31 +62,38 @@ def panel_ejecucion():
     if tareas.en_curso():
         with st.container(border=True):
             c1, c2 = st.columns([4, 1])
-            c1.markdown(f"**⏳ {t.etiqueta}** · en curso desde hace {t.minutos()} min · la inició {t.usuario}")
-            if c2.button("Detener", key="detener", width="stretch"):
+            c1.markdown(f"**⏳ {t.etiqueta}** · lleva {t.minutos()} min · la inició {t.usuario}")
+            if c2.button("Detener", key="detener", width="stretch", icon=":material/stop:"):
                 tareas.detener()
-            st.caption("Corre en el servidor: puedes cerrar esta pestaña o seguir trabajando en otras páginas. "
-                       "Lo encontrado va llegando a la bandeja fuente por fuente: en Bandeja de revisión → Por revisar, "
-                       "filtra el origen «Mapeo automático».")
-            st.code("\n".join(t.lineas[-15:]) or "Empezando…", language=None)
-    elif t is not None and t.fin and time.time() - t.fin < 900:
+            hechas, total, enviadas, pend = progreso(t.lineas)
+            if total:
+                st.progress(hechas / total, text=f"{hechas} de {total} fuentes revisadas"
+                            + (f" · {enviadas} completas enviadas a revisión · {pend} por completar" if t.comando == "mapear" else ""))
+            else:
+                st.progress(0.0, text="Preparando…")
+            st.caption("Puedes cerrar esta pestaña o seguir trabajando: la búsqueda sigue en el servidor y lo encontrado "
+                       "va llegando a Revisar convocatorias.")
+            with st.expander("Ver detalle técnico"):
+                st.code("\n".join(t.lineas[-25:]) or "Empezando…", language=None)
+    elif t is not None and t.fin and time.time() - t.fin < 1800:
         icono = {"Terminada": "✅", "Detenida": "⏹️", "Error": "⚠️"}.get(t.estado, "")
+        hechas, total, enviadas, pend = progreso(t.lineas)
         with st.container(border=True):
-            st.markdown(f"**{icono} {t.etiqueta}: {t.estado.lower()}** en {t.minutos()} min.")
+            st.markdown(f"**{icono} {t.etiqueta}: {t.estado.lower()}** en {t.minutos()} min"
+                        + (f" · {hechas} de {total} fuentes revisadas" if total else "")
+                        + (f" · **{enviadas} completas** enviadas a revisión · {pend} quedaron por completar"
+                           if t.comando == "mapear" else "") + ".")
             if t.estado == "Error":
                 st.code("\n".join(t.lineas[-8:]), language=None)
-            c1, c2 = st.columns(2)
-            if t.comando in ("mapear", "buscar-externo"):
-                c1.page_link("paginas/bandeja.py", label="Revisar lo encontrado en la bandeja →")
-            if c2.button("Ver resultados aquí", key="ver_res"):
-                st.rerun(scope="app")
+            if t.comando in ("mapear", "buscar-externo", "completar-pendientes"):
+                st.page_link("paginas/bandeja.py", label="Revisar lo que encontró", icon=":material/fact_check:")
 
 
 interrumpida = tareas.interrumpida(A)
 if interrumpida:
-    st.warning(f"La ejecución «{interrumpida.get('etiqueta', '')}» del {interrumpida.get('inicio', '')} se interrumpió porque el "
-               "servidor se reinició. Lo que alcanzó a encontrar ya está en la bandeja. Puedes volver a ejecutarla: no repite "
-               "lo que ya está en el sistema.")
+    st.warning(f"La búsqueda «{interrumpida.get('etiqueta', '')}» del {interrumpida.get('inicio', '')} se interrumpió porque el "
+               "servidor se reinició. Lo que alcanzó a encontrar ya está en Revisar convocatorias. Puedes volver a ejecutarla: "
+               "no repite lo que ya está en el sistema.")
 panel_ejecucion()
 OCUPADO = tareas.en_curso()
 
@@ -81,138 +106,206 @@ for c in ("Grupo", "Verificación del dominio", "Origen", "Modalidades a buscar"
         fuentes[c] = fuentes.get("Tipo de fuente", "") if c == "Grupo" else ""
 activas = fuentes[fuentes["Activa"].str.lower().isin(["sí", "si"])]
 por_confirmar = fuentes[fuentes["Verificación del dominio"].str.startswith("Por confirmar") | (fuentes["Dominio oficial"] == "")]
-k = st.columns(4)
-for col, (v, lab) in zip(k, [(len(fuentes), "fuentes configuradas"), (len(activas), "fuentes activas"),
-                             (activas["Grupo"].nunique(), "grupos de fuentes"),
-                             (len(por_confirmar), "sin dominio confirmado (inactivas)")]):
-    col.markdown(f"<div class='kpi'><div class='v'>{v}</div><div class='l'>{lab}</div></div>", unsafe_allow_html=True)
-st.write("")
-resumen = activas.groupby("Grupo").size().rename("Fuentes activas").reset_index()
-st.dataframe(resumen, hide_index=True, width="content")
-
 grupos = sorted(g for g in activas["Grupo"].unique() if g)
-elegidos = st.multiselect("Qué fuentes revisar", grupos, default=grupos,
-                          help="Con más de 200 fuentes, una corrida completa puede tardar más de una hora. "
-                               "Se puede ejecutar por grupos: por ejemplo, un grupo cada día.")
-n_sel = activas["Grupo"].isin(elegidos).sum()
-minutos = max(1, round(n_sel * 1.5 / 6))
-st.caption(f"{n_sel} fuentes seleccionadas · tiempo estimado: unos {minutos} minutos. Corre en segundo plano en el servidor: "
-           "puedes cerrar la pestaña y volver después.")
-extra = [] if set(elegidos) == set(grupos) else [x for g in elegidos for x in ("--grupo", g)]
-
-c1, c2 = st.columns(2)
-with c1:
-    st.markdown("#### 1. Validar fuentes")
-    st.write("Comprueba que cada sitio responda, que no redirija a otro dominio, que se identifique con el nombre del oferente "
-             "y encuentra su página de convocatorias. Hazlo la primera vez y una vez al mes.")
-    if st.button("Validar fuentes", width="stretch", disabled=not elegidos or OCUPADO):
-        ejecutar("validar-fuentes", "Validando fuentes", extra)
-with c2:
-    st.markdown("#### 2. Ejecutar el mapeo")
-    st.write("Revisa las fuentes seleccionadas buscando becas, subvenciones, cooperación técnica y premios, "
-             "y deja en la bandeja lo nuevo o actualizado.")
-    if st.button("Ejecutar mapeo ahora", type="primary", width="stretch", disabled=not elegidos or OCUPADO):
-        ejecutar("mapear", "Buscando convocatorias", extra)
-
-# --- búsqueda externa con Gemini ---------------------------------------------------
-st.divider()
-st.markdown("#### 3. Búsqueda externa con Gemini (cuando se requiera)")
-st.write("Busca en Google, con Gemini, convocatorias en **sitios oficiales que no están entre las fuentes**. "
-         "La instrucción le exige sitios oficiales, que Colombia sea elegible, convocatorias abiertas, becas que no estén en ICETEX "
-         "y los valores de las listas del formulario. Gemini solo propone: el sistema abre cada página y le aplica las mismas reglas "
-         "del mapeo; descarta agregadores, ICETEX y los enlaces que no existen. Lo que pasa llega a la bandeja.")
 clave = os.environ.get("GEMINI_API_KEY") or ui.secretos().get("GEMINI_API_KEY", "")
 if clave:
     os.environ["GEMINI_API_KEY"] = clave
+
+tarjeta = st.container(border=True)  # se dibuja primero, pero usa las opciones de abajo
+opciones = st.expander("Opciones de la búsqueda (no hace falta cambiarlas)", icon=":material/tune:")
+with opciones:
+    elegidos = st.multiselect("Grupos de fuentes a revisar", grupos, default=grupos,
+                              help="Por defecto se revisan todas. Si tienes poco tiempo, elige uno o dos grupos.")
+    o1, o2 = st.columns(2)
+    con_gemini = o1.toggle("Completar campos con Gemini", value=bool(clave), disabled=not clave,
+                           help="Gemini lee la página de cada convocatoria NUEVA y llena objetivos, poblaciones, requisitos, nombre "
+                                "y descripción en español. Una consulta por convocatoria nueva (máximo 80 por búsqueda). En el plan "
+                                "gratuito no cuesta, pero cuenta para el límite diario. Apagado, lo que esté en otro idioma o "
+                                "incompleto queda «Por completar» y no pasa a la bandeja." if clave else
+                                "No está disponible: falta la clave de Gemini en los secretos.")
+    completo = o2.toggle("Revisión completa", help="Vuelve a abrir también las convocatorias ya conocidas, para detectar cambios. "
+                         "Tarda bastante más. Igual se hace sola en cada fuente cada 30 días.")
+    o3, o4 = st.columns(2)
+    paralelo = o3.slider("Sitios a la vez", 3, 12, 10, help="Más sitios a la vez = más rápido. Si la app se pone lenta, bájalo.")
+    pausa = o4.slider("Segundos entre páginas del mismo sitio", 1.0, 5.0, 2.0, 0.5,
+                      help="Pausa de cortesía para no saturar cada sitio. No se recomienda menos de 2.")
+
+sel = activas[activas["Grupo"].isin(elegidos)]
+fallidas = sel["Estado de validación"].str.startswith(("Sitio no responde", "Bloqueado por robots", "Redirige a otro dominio",
+                                                       "No oficial", "Falta dominio"))
+n_sel = int((~fallidas).sum())
+primera_vez = not A.leer_archivo("historial_mapeo.json")
+completa_efectiva = completo or primera_vez
+minutos = max(1, round(n_sel * (1.6 if completa_efectiva else 0.35) * pausa / 2 / paralelo))
+extra = [] if set(elegidos) == set(grupos) else [x for g in elegidos for x in ("--grupo", g)]
+extra += ["--paralelo", str(paralelo), "--pausa", str(pausa)]
+extra_mapeo = extra + (["--completo"] if completo else []) + ([] if con_gemini else ["--sin-gemini"])
+
+with tarjeta:
+    st.markdown("#### Buscar convocatorias nuevas")
+    tiempo = f"unos {minutos} minutos" if minutos < 90 else f"cerca de {round(minutos / 60, 1)} horas"
+    st.write(f"Se revisarán **{n_sel} sitios oficiales** · tiempo estimado: **{tiempo}**"
+             + (" (la primera vez tarda más; las siguientes solo abren lo nuevo)" if primera_vez else "")
+             + (" · con Gemini completando los campos" if con_gemini else " · sin Gemini") + ".")
+    if st.button("Buscar convocatorias nuevas", type="primary", disabled=not elegidos or OCUPADO, icon=":material/search:"):
+        ejecutar("mapear", "Búsqueda de convocatorias" + (" (revisión completa)" if completo else ""), extra_mapeo)
+    if OCUPADO:
+        st.caption("Hay una búsqueda en curso; espera a que termine.")
+    elif fallidas.any():
+        st.caption(f"Se saltan {int(fallidas.sum())} sitios que no respondieron en la última validación "
+                   "(ver *Mantenimiento de fuentes*, más abajo).")
+
+# --- por completar: lo que encontró pero no está en español o le faltan datos -----------------
+from bandeja import flujo as F  # noqa: E402
+from calidad import entrada as E  # noqa: E402
+
+por_completar = A.items(E.ESTADO)
+if por_completar:
+    with st.container(border=True):
+        st.markdown(f"#### {len(por_completar)} convocatorias por completar")
+        st.caption("Las encontró la búsqueda, pero **no pasan a la bandeja** porque no están en español o les faltan datos "
+                   "obligatorios. El sistema las vuelve a intentar sola en cada búsqueda (hasta "
+                   f"{E.INTENTOS_MAXIMOS} veces), con Gemini leyendo su página oficial."
+                   + ("" if clave else " **Sin la clave de Gemini no se pueden traducir ni completar.**"))
+        tabla_pc = pd.DataFrame([{"id": i["id"], "Convocatoria": i["datos"].get("Nombre de la Convocatoria", ""),
+                                  "Oferente": i["datos"].get("Nombre de la Fuente", ""),
+                                  "Qué le falta": "; ".join(f.split(":")[0] for f in i["meta"].get("faltantes", [])) or "—",
+                                  "Intentos": int(i["meta"].get("intentos", 0)),
+                                  "Página": i["datos"].get("Cómo aplicar") if str(i["datos"].get("Cómo aplicar", "")).startswith("http") else None}
+                                 for i in por_completar])
+        ev = st.dataframe(tabla_pc.drop(columns="id"), hide_index=True, width="stretch", on_select="rerun",
+                          selection_mode="multi-row", key="tabla_pc", height=min(380, 38 + 35 * len(tabla_pc)),
+                          column_config={"Página": st.column_config.LinkColumn(display_text="Abrir ↗"),
+                                         "Convocatoria": st.column_config.TextColumn(width="large"),
+                                         "Qué le falta": st.column_config.TextColumn(width="large")})
+        marcadas = [tabla_pc.iloc[n]["id"] for n in (ev.selection.rows if ev and ev.selection else [])]
+        p1, p2, p3 = st.columns([1.2, 1.3, 2])
+        if p1.button("Reintentar ahora", disabled=OCUPADO or not clave, icon=":material/refresh:",
+                     help="Gemini vuelve a leer la página de cada una. Las que queden completas pasan a la bandeja."):
+            ejecutar("completar-pendientes", "Completar convocatorias pendientes", ["--reintentar-todas"])
+        if p2.button(f"Descartar marcadas ({len(marcadas)})", disabled=not marcadas,
+                     help="Para las que no sirven (por ejemplo, un folleto o una página que no es una convocatoria)."):
+            F.descartar_varias(A, [i for i in por_completar if i["id"] in marcadas], YO["nombre"],
+                               "No se pudo completar con la información de la página")
+            st.rerun()
+        p3.caption("Marca filas para descartarlas. Si una sirve y la página no trae la información, puedes registrarla "
+                   "a mano en Revisar convocatorias → Registrar convocatoria.")
+
+# --- resultado de la última búsqueda ------------------------------------------------
+ult = A.leer_archivo("ultimo_mapear.json")
+if ult and not OCUPADO:
+    r = json.loads(ult)
+    with st.container(border=True):
+        listo = [l for l in r.get("log", []) if "Listo:" in l]
+        st.markdown(f"**Última búsqueda:** {r['fecha']} · {r['usuario']}"
+                    + (f"  \n{listo[-1].split('Listo:', 1)[1].strip()}" if listo else ""))
+        b1, b2 = st.columns([1, 2])
+        rep = A.leer_archivo("ultimo_mapeo.xlsx")
+        if rep:
+            b1.download_button("Descargar reporte (Excel)", rep, f"reporte_busqueda_{r['fecha'][:10]}.xlsx", icon=":material/download:")
+        with b2.expander("Ver detalle técnico"):
+            st.code("\n".join(r["log"]) or "(sin mensajes)")
+
+# --- búsqueda fuera de las fuentes, con Gemini ---------------------------------------
+st.markdown("#### Buscar en otros sitios oficiales (con Gemini)")
+st.write("Úsala cuando necesites algo puntual, por ejemplo un tema o un país. Gemini busca en Google convocatorias en **sitios "
+         "oficiales que no están en la lista de fuentes**; el sistema abre cada página y le aplica las mismas reglas "
+         "(sitio oficial, Colombia elegible, convocatoria abierta, sin agregadores ni ICETEX). Lo que pasa llega a la revisión.")
+if clave:
     g1, g2, g3 = st.columns([1.3, 1.3, 0.8])
     mods = g1.multiselect("Modalidades", ["Beca", "Subvención", "Cooperación técnica", "Premio"],
                           default=["Beca", "Subvención", "Cooperación técnica", "Premio"])
     tema = g2.text_input("Tema (opcional)", placeholder="Ej.: cambio climático, paz, salud")
     region = g2.text_input("País o región del oferente (opcional)", placeholder="Ej.: Unión Europea, Japón")
-    maximo = g3.number_input("Convocatorias a pedir", 3, 20, 10)
-    if st.button("Buscar con Gemini", disabled=not mods or OCUPADO):
+    maximo = g3.number_input("Cuántas pedir", 3, 20, 10)
+    if st.button("Buscar con Gemini", disabled=not mods or OCUPADO, icon=":material/travel_explore:"):
         extra_g = [x for m in mods for x in ("--modalidad", m)] + ["--maximo", str(maximo)]
         if tema:
             extra_g += ["--tema", tema]
         if region:
             extra_g += ["--region", region]
-        ejecutar("buscar-externo", "Búsqueda externa con Gemini", extra_g)
+        ejecutar("buscar-externo", "Búsqueda con Gemini", extra_g)
+    st.caption("Si aparece un error de facturación: en algunos modelos, la búsqueda en Google de Gemini exige tener la facturación "
+               "activa. La búsqueda normal de arriba no lo necesita.")
 else:
-    st.info("Para activarla, el administrador debe agregar el secreto **GEMINI_API_KEY** (clave de Google AI Studio) "
-            "en la configuración del servidor (Hugging Face: Settings → Variables and secrets; Streamlit: Secrets).")
+    st.info("No está disponible todavía: el administrador debe agregar la clave **GEMINI_API_KEY** en los secretos de Streamlit.")
 
 ext = A.leer_archivo("ultima_busqueda_externa.xlsx")
 if ext:
     import io
     reg = json.loads(A.leer_archivo("ultimo_buscar-externo.json") or b"{}")
-    st.markdown(f"**Última búsqueda externa:** {reg.get('fecha', '')} · {reg.get('usuario', '')}")
     hojas = pd.read_excel(io.BytesIO(ext), sheet_name=None, dtype=str)
-    with st.expander("Ver resultado de la última búsqueda externa"):
-        st.markdown("**Descartadas**")
+    with st.expander(f"Resultado de la última búsqueda con Gemini ({reg.get('fecha', '')} · {reg.get('usuario', '')})"):
+        st.download_button("Descargar resultado (Excel)", ext, "busqueda_gemini.xlsx", icon=":material/download:")
+        st.markdown("**Descartadas y por qué**")
         st.dataframe(hojas.get("Descartadas", pd.DataFrame()).fillna(""), hide_index=True, width="stretch")
-        st.code("\n".join(reg.get("log", [])) or "(sin mensajes)")
-    st.download_button("Descargar resultado de la búsqueda externa (Excel)", ext, "busqueda_externa.xlsx")
-    sug = hojas.get("Fuentes sugeridas", pd.DataFrame()).fillna("")
-    if len(sug):
-        st.markdown("**Sitios oficiales nuevos encontrados** (se pueden agregar como fuentes del mapeo)")
-        if YO["rol"] == "admin":
-            sug.insert(0, "Agregar", False)
-            editado = st.data_editor(sug, hide_index=True, width="stretch", disabled=[c for c in sug.columns if c != "Agregar"])
-            elegidas = editado[editado["Agregar"]].drop(columns="Agregar").to_dict("records")
-            if st.button("Agregar las marcadas como fuentes", disabled=not elegidas):
-                import mapeo as programa
-                tmp = Path(tempfile.mkdtemp()) / CFG
-                tmp.write_bytes(config_bytes())
-                programa.agregar_fuentes(tmp, elegidas)
-                A.guardar_archivo(CFG, tmp.read_bytes())
-                st.success(f"{len(elegidas)} fuentes agregadas. Ejecuta «Validar fuentes» para confirmarlas.")
-                st.rerun()
-        else:
-            st.dataframe(sug, hide_index=True, width="stretch")
-            st.caption("El administrador decide si se agregan como fuentes.")
+        sug = hojas.get("Fuentes sugeridas", pd.DataFrame()).fillna("")
+        if len(sug):
+            st.markdown("**Sitios oficiales nuevos encontrados** (se pueden agregar a la lista de fuentes)")
+            if YO["rol"] == "admin":
+                sug.insert(0, "Agregar", False)
+                editado = st.data_editor(sug, hide_index=True, width="stretch", disabled=[c for c in sug.columns if c != "Agregar"])
+                elegidas = editado[editado["Agregar"]].drop(columns="Agregar").to_dict("records")
+                if st.button("Agregar los marcados como fuentes", disabled=not elegidas):
+                    import mapeo as programa
+                    tmp = Path(tempfile.mkdtemp()) / CFG
+                    tmp.write_bytes(config_bytes())
+                    programa.agregar_fuentes(tmp, elegidas)
+                    A.guardar_archivo(CFG, tmp.read_bytes())
+                    st.success(f"{len(elegidas)} fuentes agregadas. Valídalas en Mantenimiento de fuentes.")
+                    st.rerun()
+            else:
+                st.dataframe(sug, hide_index=True, width="stretch")
+                st.caption("El administrador decide si se agregan como fuentes.")
+        if st.toggle("Ver detalle técnico", key="det_gemini"):
+            st.code("\n".join(reg.get("log", [])) or "(sin mensajes)")
 
+# --- mantenimiento de fuentes -------------------------------------------------------
 st.divider()
-ult = A.leer_archivo("ultimo_mapear.json")
-if ult:
-    r = json.loads(ult)
-    st.markdown(f"**Última ejecución del mapeo:** {r['fecha']} · {r['usuario']}")
-    with st.expander("Ver registro de la última ejecución"):
-        st.code("\n".join(r["log"]) or "(sin mensajes)")
-    rep = A.leer_archivo("ultimo_mapeo.xlsx")
-    if rep:
-        st.download_button("Descargar reporte de la última ejecución (Excel)", rep, f"reporte_mapeo_{r['fecha'][:10]}.xlsx")
+st.markdown("#### Mantenimiento de fuentes")
+st.caption("Una vez al mes: comprobar que los sitios oficiales siguen funcionando. También aquí se consulta la lista de fuentes.")
+k = st.columns(4)
+for col, (v, lab) in zip(k, [(len(fuentes), "fuentes en la lista"), (len(activas), "activas"),
+                             (activas["Grupo"].nunique(), "grupos"),
+                             (len(por_confirmar), "sin dominio confirmado (inactivas)")]):
+    col.markdown(f"<div class='kpi'><div class='v'>{v}</div><div class='l'>{lab}</div></div>", unsafe_allow_html=True)
+st.write("")
+m1, m2 = st.columns([1, 2])
+if m1.button("Validar fuentes", disabled=not elegidos or OCUPADO, icon=":material/verified:", width="stretch"):
+    ejecutar("validar-fuentes", "Validación de fuentes", extra)
+m2.caption("Comprueba que cada sitio responda, que no redirija a otro dominio, que sea del oferente y encuentra su página de "
+           "convocatorias. Los sitios que fallan se saltan en la búsqueda hasta la siguiente validación.")
 
-st.markdown("#### Fuentes")
-f1, f2 = st.columns([1, 1.4])
-filtro_grupo = f1.selectbox("Grupo", ["Todos"] + sorted(g for g in fuentes["Grupo"].unique() if g))
-buscar = f2.text_input("Buscar fuente")
-vista = fuentes if filtro_grupo == "Todos" else fuentes[fuentes["Grupo"] == filtro_grupo]
-if buscar:
-    vista = vista[vista["Nombre"].str.contains(buscar, case=False) | vista["Dominio oficial"].str.contains(buscar, case=False)]
-cols = ["ID", "Activa", "Grupo", "Nombre", "País", "Dominio oficial", "Verificación del dominio", "Modalidades a buscar",
-        "URL de convocatorias", "URL de becas", "Estado de validación", "Última validación", "Origen", "Notas"]
-st.dataframe(vista[[c for c in cols if c in vista.columns]], hide_index=True, width="stretch", height=420,
-             column_config={"Dominio oficial": st.column_config.LinkColumn(), "URL de convocatorias": st.column_config.LinkColumn()})
+with st.expander("Ver la lista de fuentes", icon=":material/list:"):
+    f1, f2 = st.columns([1, 1.4])
+    filtro_grupo = f1.selectbox("Grupo", ["Todos"] + sorted(g for g in fuentes["Grupo"].unique() if g))
+    buscar = f2.text_input("Buscar fuente")
+    vista = fuentes if filtro_grupo == "Todos" else fuentes[fuentes["Grupo"] == filtro_grupo]
+    if buscar:
+        vista = vista[vista["Nombre"].str.contains(buscar, case=False) | vista["Dominio oficial"].str.contains(buscar, case=False)]
+    cols = ["ID", "Activa", "Grupo", "Nombre", "País", "Dominio oficial", "Verificación del dominio", "Modalidades a buscar",
+            "URL de convocatorias", "URL de becas", "Estado de validación", "Última validación", "Origen", "Notas"]
+    st.dataframe(vista[[c for c in cols if c in vista.columns]], hide_index=True, width="stretch", height=420,
+                 column_config={"Dominio oficial": st.column_config.LinkColumn(), "URL de convocatorias": st.column_config.LinkColumn()})
 
 if YO["rol"] == "admin":
-    st.divider()
-    st.markdown("#### Configuración (administrador)")
-    st.write("Las fuentes, palabras de cada modalidad, reglas de elegibilidad y exclusiones de ICETEX están en un Excel. "
-             "Descárgalo, edítalo y vuelve a cargarlo.")
-    c1, c2 = st.columns(2)
-    c1.download_button("Descargar configuración", config_bytes(), CFG, width="stretch")
-    nuevo = c2.file_uploader("Cargar configuración editada", type="xlsx")
-    if nuevo and c2.button("Guardar configuración"):
-        from openpyxl import load_workbook
-        try:
-            wb = load_workbook(nuevo)
-            faltan = {"Fuentes", "Elegibilidad", "Parametros"} - set(wb.sheetnames)
-            if not {"Palabras_modalidad", "Palabras_beca"} & set(wb.sheetnames):
-                faltan.add("Palabras_modalidad")
-            if faltan:
-                raise ValueError("Faltan las hojas: " + ", ".join(sorted(faltan)))
-            A.guardar_archivo(CFG, nuevo.getvalue())
-            st.success("Configuración guardada.")
-            st.rerun()
-        except Exception as e:  # noqa: BLE001
-            st.error(f"El archivo no es una configuración válida: {e}")
+    with st.expander("Configuración (solo administrador)", icon=":material/settings:"):
+        st.write("Las fuentes, palabras de cada modalidad, reglas de elegibilidad y exclusiones de ICETEX están en un Excel. "
+                 "Descárgalo, edítalo y vuelve a cargarlo.")
+        c1, c2 = st.columns(2)
+        c1.download_button("Descargar configuración", config_bytes(), CFG, width="stretch")
+        nuevo = c2.file_uploader("Cargar configuración editada", type="xlsx")
+        if nuevo and c2.button("Guardar configuración"):
+            from openpyxl import load_workbook
+            try:
+                wb = load_workbook(nuevo)
+                faltan = {"Fuentes", "Elegibilidad", "Parametros"} - set(wb.sheetnames)
+                if not {"Palabras_modalidad", "Palabras_beca"} & set(wb.sheetnames):
+                    faltan.add("Palabras_modalidad")
+                if faltan:
+                    raise ValueError("Faltan las hojas: " + ", ".join(sorted(faltan)))
+                A.guardar_archivo(CFG, nuevo.getvalue())
+                st.success("Configuración guardada.")
+                st.rerun()
+            except Exception as e:  # noqa: BLE001
+                st.error(f"El archivo no es una configuración válida: {e}")

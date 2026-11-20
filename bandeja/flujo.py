@@ -72,10 +72,10 @@ def evaluar(almacen, datos, hoy=None, catalogo=None, base=None):
     return R.validar(datos, catalogo, base, hoy=hoy or date.today(), nuevo=True)
 
 
-def ingresar(almacen, datos, origen, usuario, meta=None, hoy=None):
+def ingresar(almacen, datos, origen, usuario, meta=None, hoy=None, estado="Por revisar", catalogo=None, base=None):
     """Toda convocatoria entra por aquí: nunca directo a la base."""
-    norm, hallazgos = evaluar(almacen, datos, hoy)
-    item = nuevo_item(norm, origen, meta)
+    norm, hallazgos = evaluar(almacen, datos, hoy, catalogo, base)
+    item = nuevo_item(norm, origen, meta, estado)
     item["meta"]["hallazgos_ingreso"] = [h.__dict__ for h in hallazgos]
     _evento(item, usuario, "Ingreso", origen)
     almacen.guardar_item(item)
@@ -119,6 +119,16 @@ def aprobar(almacen, item, datos, usuario, chequeo, hoy=None):
 MOTIVOS_DESCARTE = ["No es una convocatoria (noticia, página general, empleo)", "Colombia no es elegible",
                     "Ya cerró", "Duplicada en el mismo año", "La fuente no es oficial", "Beca ofrecida vía ICETEX",
                     "Información insuficiente", "Otro motivo"]
+
+
+def tocada_por_persona(item):
+    """True si alguien ya la editó o la revisó (entonces el sistema no la mueve ni la descarta solo)."""
+    return any(e.get("accion") != "Ingreso" for e in item.get("historial", []))
+
+
+def es_automatica(item):
+    o = str(item.get("origen", ""))
+    return o.startswith("Mapeo automático") or o.startswith("Búsqueda externa")
 
 
 def pendientes(item):

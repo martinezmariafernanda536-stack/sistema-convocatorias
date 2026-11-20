@@ -44,6 +44,32 @@ def detectar_modalidad(titulo, url, texto_norm, cfg, permitidas):
 
 
 # --- ¿Pueden postularse colombianos? ----------------------------------------
+_PERMITIDAS = ("colombian", "latinoamerican", "latin american", "iberoamerican", "extranjer", "foreign", "cualquier", "any",
+               "all", "todas", "otra", "other", "international", "internacional")
+_NACIONALIDAD = [
+    re.compile(r"(?:nacionalidad|ciudadania)\s+([a-z]+)"),
+    re.compile(r"\bser\s+(?:ciudadan[oa]|de nacionalidad)\s+([a-z]+)"),
+    re.compile(r"\bmust be (?:a |an )?([a-z]+) (?:citizen|national)s?"),
+    re.compile(r"\b([a-z]+) (?:citizens|nationals) only\b"),
+    re.compile(r"\bonly (?:open to |for )?([a-z]+) (?:citizens|nationals)\b"),
+]
+
+
+def nacionalidad_exigida(texto_norm):
+    """Si el texto exige una nacionalidad distinta de la colombiana («Nacionalidad mexicana», «must be a US citizen»),
+    devuelve esa frase. No cuenta si a continuación admite otras («mexicana o extranjera»)."""
+    for patron in _NACIONALIDAD:
+        for m in patron.finditer(texto_norm):
+            palabra = m.group(1)
+            if len(palabra) < 2 or palabra.startswith(_PERMITIDAS) or palabra in ("de", "del", "la", "el", "su", "the", "and"):
+                continue
+            despues = texto_norm[m.end():m.end() + 40]
+            if re.match(r"\s*(?:,\s*)?(?:o|u|or|y/o|and/or)\s+(?:de\s+)?(?:extranjer|foreign|otra|other|cualquier|any|international|colombian)", despues):
+                continue
+            return texto_norm[m.start():m.end()]
+    return ""
+
+
 def elegibilidad(texto_norm, cfg):
     """Devuelve (resultado, puntaje, motivo).
 
@@ -68,6 +94,10 @@ def elegibilidad(texto_norm, cfg):
         else:
             positivos += puntos
             fuertes = fuertes or puntos >= 3
+    nacionalidad = nacionalidad_exigida(texto_norm)
+    if nacionalidad:
+        restriccion = True
+        motivos.append(f"Exige una nacionalidad que no es la colombiana: «{nacionalidad}»")
     if exclusion:
         return "No elegible", positivos, "; ".join(motivos)
     if restriccion and not fuertes:

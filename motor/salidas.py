@@ -80,7 +80,7 @@ def fila_airtable(datos, url, fuente, pagina, cfg, elig, icetex, duplicado, hoy)
         "Descripción": datos["descripcion"],
         "Dirigida a (tipo de publico)": _multi(datos["publico"]),
         "Esta convocatoria prioriza alguna de las siguientes poblaciones?": _multi(datos["poblaciones"]) if datos["poblaciones"] else "",
-        "Áreas temáticas de interés": _multi(datos["temas"]),
+        "Áreas temáticas de interés": _multi(datos["temas"][:3]),  # el formulario admite hasta 3
         "Financiación": f"${datos['monto_usd']:.2f}" if datos["monto_usd"] else "",
         "Observaciones sobre el financiamiento": obs_monto,
         "Ámbito Geográfico": reglas.ambito(datos["texto_norm"]),

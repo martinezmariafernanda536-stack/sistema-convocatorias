@@ -357,7 +357,7 @@ def test_excel_completo_trae_todos_los_estados(tmp_path):
     a = AlmacenSQLite(tmp_path / "e.db")
     MG.migrar(pd.read_csv(RAIZ / "datos" / "airtable_actual.csv"), a, hoy=date(2026, 11, 8))
     libro = pd.ExcelFile(io.BytesIO(excel_completo(a)))
-    assert libro.sheet_names == ["Base", "Por revisar", "Actor pendiente", "Descartadas", "Actores"]
+    assert libro.sheet_names == ["Base", "Por revisar", "Actor pendiente", "Por completar", "Descartadas", "Actores"]
     base = pd.read_excel(libro, "Base")
     assert len(base) == len(a.items("Aprobada"))
     for col in ("Estado", "Tipo de actor", "Tipo de monto", "Nombre de la Convocatoria", "ODS", "Errores de calidad pendientes"):
@@ -612,3 +612,30 @@ def test_descartar_varias_en_una_sola_version(tmp_path):
     assert gh.commits == antes + 1
     assert len(a.items("Descartada")) == 5 and a.items("Descartada")[0]["observacion"] == "Ya cerró"
     assert F.pendientes(a.items("Descartada")[0]) is not None
+
+
+
+def test_enlaces_iguales_escritos_distinto_y_ediciones():
+    url = "https://www.daad.de/en/epos/"
+    a = {"Nombre de la Convocatoria": "Becas EPOS", "Cómo aplicar": url, "Fecha Límite de Aplicación": "1/3/2027"}
+    for otra in ("http://daad.de/es/epos", "https://daad.de/epos/index.html", "https://www.daad.de/en/epos/?utm_source=chatgpt.com#top"):
+        assert R.buscar_duplicado(a | {"Cómo aplicar": otra}, [a])[0] == "mismo_año", otra
+    # traducida al español y con el original entre paréntesis sigue siendo la misma
+    b = {"Nombre de la Convocatoria": "Premio Earthshot (The Earthshot Prize)", "Cómo aplicar": "https://e.org/a", "Fecha Límite de Aplicación": "1/3/2027"}
+    assert R.buscar_duplicado(b | {"Nombre de la Convocatoria": "The Earthshot Prize", "Cómo aplicar": "https://e.org/b"}, [b])[0] == "nombre_mismo_año"
+    # 28ª y 29ª convocatoria en la misma página son distintas
+    c = {"Nombre de la Convocatoria": "28ª Convocatoria de Propuestas Agricultores", "Cómo aplicar": "https://f.org/c", "Fecha Límite de Aplicación": "1/3/2027"}
+    assert R.buscar_duplicado(c | {"Nombre de la Convocatoria": "29ª Convocatoria de Propuestas Agricultores"}, [c])[0] == ""
+    # dos universidades distintas no son la misma beca
+    d = {"Nombre de la Convocatoria": "Becas de máster en la Universidad de Alcalá", "Cómo aplicar": "https://g.org/1", "Fecha Límite de Aplicación": "1/3/2027"}
+    assert R.buscar_duplicado(d | {"Nombre de la Convocatoria": "Becas de máster en la Universidad de Santiago", "Cómo aplicar": "https://g.org/2"}, [d])[0] == ""
+
+
+def test_control_de_entrada_idioma():
+    from calidad import entrada as E
+    assert not E.en_espanol("The CRI Fellowship Program supports young scientists at institutions who wish to train.")
+    assert not E.en_espanol("Training Week", "Nombre de la Convocatoria")
+    assert E.en_espanol("Semana de formación (Training Week)", "Nombre de la Convocatoria")
+    assert E.en_espanol("Premio CRI IGNITE", "Nombre de la Convocatoria")
+    assert not E.en_espanol("O edital oferece bolsas para pesquisadores com projetos")
+    assert E.en_espanol("El programa apoya a jóvenes investigadores que deseen formarse.")

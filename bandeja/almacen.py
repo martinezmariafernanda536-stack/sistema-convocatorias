@@ -23,7 +23,7 @@ from calidad.actores import Actor, Catalogo, caracter_de, limpiar_nombre
 
 RAIZ = Path(__file__).resolve().parents[1]
 BASE_INICIAL = RAIZ / "datos" / "base_inicial.db"  # convocatorias migradas de Airtable, sin usuarios
-ESTADOS = ["Por revisar", "Actor pendiente de crear", "Aprobada", "Descartada"]
+ESTADOS = ["Por completar", "Por revisar", "Actor pendiente de crear", "Aprobada", "Descartada"]
 ESQUEMA = """
 CREATE TABLE IF NOT EXISTS convocatorias (
   id TEXT PRIMARY KEY, estado TEXT NOT NULL, origen TEXT, ingreso TEXT, revisado_por TEXT, observacion TEXT,

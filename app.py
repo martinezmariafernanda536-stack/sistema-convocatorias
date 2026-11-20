@@ -219,23 +219,31 @@ if ui.usuario().get("sin_codigos"):
     st.stop()
 
 yo = ui.usuario()
-paginas = [
-    st.Page("paginas/inicio.py", title="Inicio", icon=":material/home:", default=True),
-    st.Page("paginas/tablero.py", title="Dashboard e informes", icon=":material/bar_chart:"),
-    st.Page("paginas/bandeja.py", title="Bandeja de revisión", icon=":material/fact_check:"),
-    st.Page("paginas/base.py", title="Base y calidad", icon=":material/database:"),
-    st.Page("paginas/mapeo.py", title="Mapeo automático", icon=":material/travel_explore:"),
-]
+ROL_LEGIBLE = {"admin": "Administrador", "revisor": "Revisor"}
+paginas = {
+    "Trabajo diario": [
+        st.Page("paginas/inicio.py", title="Inicio", icon=":material/home:", default=True),
+        st.Page("paginas/bandeja.py", title="Revisar convocatorias", icon=":material/fact_check:"),
+        st.Page("paginas/mapeo.py", title="Buscar convocatorias", icon=":material/travel_explore:"),
+    ],
+    "Consultar": [
+        st.Page("paginas/base.py", title="Base de convocatorias", icon=":material/database:"),
+        st.Page("paginas/tablero.py", title="Dashboard e informes", icon=":material/bar_chart:"),
+    ],
+    "Ayuda": [st.Page("paginas/guia.py", title="Cómo se usa", icon=":material/help:")],
+    "Mi cuenta": [st.Page("paginas/cuenta.py", title="Contraseña y códigos", icon=":material/lock:")],
+}
 if yo["rol"] == "admin":
-    paginas.append(st.Page("paginas/usuarios.py", title="Usuarios", icon=":material/group:"))
-paginas.append(st.Page("paginas/cuenta.py", title="Mi cuenta", icon=":material/lock:"))
+    paginas["Mi cuenta"].append(st.Page("paginas/usuarios.py", title="Usuarios", icon=":material/group:"))
 
 with st.sidebar:
-    st.markdown(f"**{yo['nombre']}** · {yo['rol']}")
-    if st.button("Cerrar sesión"):
+    st.markdown(f"**{yo['nombre']}**  \n<span style='color:#5b6472'>{ROL_LEGIBLE.get(yo['rol'], yo['rol'])}</span>",
+                unsafe_allow_html=True)
+    if st.button("Cerrar sesión", icon=":material/logout:"):
         U.cerrar_sesion(ui.almacen(), yo["usuario"])
         st.session_state.clear()
         st.query_params.clear()
         st.rerun()
+    st.caption("¿Primera vez? Abre **Cómo se usa** en el menú.")
 
 st.navigation(paginas).run()

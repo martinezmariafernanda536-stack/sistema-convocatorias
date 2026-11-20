@@ -119,8 +119,83 @@ def mismo_periodo(a, b):
     return pa[1] is None or pb[1] is None or pa[1] == pb[1]
 
 
+_IDIOMA_RUTA = re.compile(r"^/(?:es|en|fr|de|pt|it|nl|ja|ko|zh)(?:[-_][a-z]{2})?(?=/|$)", re.I)
+
+
 def _url(v):
-    return texto(v).rstrip("/").lower()
+    """Enlace comparable: sin http/https, www., #top, parámetros de rastreo, prefijo de idioma (/en/, /es-co/…),
+    index.html ni barra final. Así la misma página escrita de dos formas cuenta como la misma."""
+    from urllib.parse import urlparse
+    from calidad.dominios import quitar_rastreo
+    u = quitar_rastreo(texto(v)).strip()
+    if not u.lower().startswith("http"):
+        return u.lower().rstrip("/")
+    p = urlparse(u)
+    host = p.netloc.lower().removeprefix("www.")
+    ruta = _IDIOMA_RUTA.sub("", p.path or "/")
+    ruta = re.sub(r"/(?:index|default)\.(?:html?|php|aspx?)$", "", ruta, flags=re.I).rstrip("/").lower()
+    ancla = p.fragment.lower()
+    # el ancla se conserva cuando señala una convocatoria dentro de una página que reúne varias (#beca-al-talento)
+    ancla = "" if ancla in ("", "top", "inicio", "main", "content", "contenido") or ancla.startswith(("!", "/")) else ancla
+    return "http://" + host + ruta + ("?" + p.query if p.query else "") + ("#" + ancla if ancla else "")
+
+
+def variantes_nombre(n):
+    """El nombre completo, el nombre en español y el original entre paréntesis («Beca X (X Scholarship)»)."""
+    n = texto(n)
+    salida = [n]
+    m = re.match(r"^(.*?)\s*\((.+)\)\s*$", n)
+    if m:
+        salida += [m.group(1), m.group(2)]
+    return [x for x in salida if len(x.strip()) >= 6]
+
+
+def _numeros(n):
+    """Números de edición o ronda del nombre. Los años no cuentan: de eso se encarga el periodo."""
+    return {x for x in re.findall(r"\d+", texto(n)) if not re.fullmatch(r"(?:19|20)\d\d", x)}
+
+
+def _compatibles(a, b):
+    """«28ª convocatoria» y «29ª convocatoria», o «Ronda 1» y «Ronda 2», son convocatorias distintas."""
+    na, nb = _numeros(a), _numeros(b)
+    return not (na and nb and na != nb)
+
+
+def _semejanza(a, b):
+    """Parecido estricto entre nombres (orden de palabras indiferente). No usa coincidencia por subconjunto de palabras:
+    «Becas de máster en la Universidad de Alcalá» y «… de Santiago» no son la misma convocatoria."""
+    from analitica.datos import norm
+    try:
+        from rapidfuzz import fuzz
+        f = fuzz.token_sort_ratio
+    except ImportError:  # pragma: no cover
+        f = similitud
+    return max((f(norm(x), norm(y)) for x in variantes_nombre(a) for y in variantes_nombre(b)), default=0)
+
+
+_GENERICAS_OFERENTE = set("universidad university universitat universite universidade de del la las los el the of and y for para "
+                          "fundacion foundation fund fondo programa program programme agencia agency instituto institute "
+                          "embajada embassy gobierno government ministerio ministry cooperacion cooperation internacional "
+                          "international nacional national organizacion organization tecnologica technology technical "
+                          "school escuela centro center centre".split())
+
+
+def _mismo_oferente(a, b):
+    """«Beca de Excelencia» de dos universidades distintas no es la misma convocatoria. «JICA» y
+    «JICA - Agencia de Cooperación Internacional del Japón» sí son el mismo oferente."""
+    from analitica.datos import norm
+    a, b = texto(a), texto(b)
+    if not a or not b or a.startswith("*") or b.startswith("*"):
+        return True
+    pa = {w for w in re.findall(r"[a-z0-9]+", norm(a)) if w not in _GENERICAS_OFERENTE and len(w) > 2}
+    pb = {w for w in re.findall(r"[a-z0-9]+", norm(b)) if w not in _GENERICAS_OFERENTE and len(w) > 2}
+    if pa and pb and (pa <= pb or pb <= pa):
+        return True
+    return _semejanza(a, b) >= 80
+
+
+def _parecido(a, b, umbral):
+    return _compatibles(a, b) and _semejanza(a, b) >= umbral
 
 
 def buscar_duplicado(d, otros, umbral_nombre=92):
@@ -130,15 +205,25 @@ def buscar_duplicado(d, otros, umbral_nombre=92):
     'edicion_anterior'  la misma convocatoria de otro año (nueva edición: se puede registrar)
     ''                  sin coincidencias"""
     url, nombre = _url(d.get("Cómo aplicar", "")), texto(d.get("Nombre de la Convocatoria", ""))
-    anterior = None
+    anterior, parecida = None, None
     for o in otros:
-        igual_url = url.startswith("http") and url == _url(o.get("Cómo aplicar", ""))
-        parecido = bool(nombre) and similitud(nombre, o.get("Nombre de la Convocatoria", "")) >= umbral_nombre
+        otro_nombre = o.get("Nombre de la Convocatoria", "")
+        # el mismo enlace es la misma convocatoria, salvo que los nombres digan otra edición o ronda (28ª y 29ª)
+        igual_url = url.startswith("http") and url == _url(o.get("Cómo aplicar", "")) and _compatibles(nombre, otro_nombre)
+        # nombre parecido del mismo oferente; o nombre largo prácticamente idéntico (aunque el oferente esté escrito distinto)
+        parecido = bool(nombre) and _parecido(nombre, otro_nombre, umbral_nombre) and (
+            _mismo_oferente(d.get("Nombre de la Fuente", ""), o.get("Nombre de la Fuente", ""))
+            or (len(nombre.split()) >= 5 and _semejanza(nombre, otro_nombre) >= 97))
         if not (igual_url or parecido):
             continue
         if mismo_periodo(d, o):
-            return ("mismo_año" if igual_url else "nombre_mismo_año"), o
-        anterior = anterior or o
+            if igual_url:
+                return "mismo_año", o
+            parecida = parecida or o
+        else:
+            anterior = anterior or o
+    if parecida is not None:
+        return "nombre_mismo_año", parecida
     return ("edicion_anterior", anterior) if anterior else ("", None)
 
 

@@ -152,8 +152,8 @@ def montos(texto):
     salida = []
     for i, patron in enumerate(_PAT_MONTO):
         for m in patron.finditer(texto):
-            moneda = m.group(1) if i == 0 else m.group(3)
-            numero = m.group(2) if i == 0 else m.group(1)
+            # patrón 0: moneda + número; patrón 1: número + moneda (solo dos grupos)
+            moneda, numero = (m.group(1), m.group(2)) if i == 0 else (m.group(2), m.group(1))
             limpio = re.sub(r"[.,\s]", "", numero)
             try:
                 valor = int(limpio)

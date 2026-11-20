@@ -8,9 +8,10 @@ Este sistema reemplaza a Airtable. Sirve para tres cosas: **encontrar** convocat
 |---|---|
 | **Inicio** | Lo que requiere atención hoy: por revisar, actores por crear, errores en la base, convocatorias que cierran pronto, lo último que llegó y la última búsqueda, con acceso directo a cada tarea |
 | **Dashboard e informes** | Indicadores, gráficos y el informe automático en Word y PDF |
-| **Bandeja de revisión** | Toda convocatoria nueva, mapeada o registrada a mano, se revisa aquí antes de entrar a la base |
-| **Base y calidad** | La base revisada. Muestra «qué falta por corregir» por tipo de pendiente; al marcar uno se filtra la tabla. Tiene filtros por año, modalidad y texto. Al marcar una fila se corrige; varias marcadas se retiran en bloque. También descarga todo en Excel e importa exports de Airtable |
-| **Mapeo automático** | Validar las fuentes y ejecutar la búsqueda de becas |
+| **Revisar convocatorias** (antes «Bandeja de revisión») | Toda convocatoria nueva, mapeada o registrada a mano, se revisa aquí antes de entrar a la base |
+| **Base de convocatorias** (antes «Base de convocatorias») | La base revisada. Muestra «qué falta por corregir» por tipo de pendiente; al marcar uno se filtra la tabla. Tiene filtros por año, modalidad y texto. Al marcar una fila se corrige; varias marcadas se retiran en bloque. También descarga todo en Excel e importa exports de Airtable |
+| **Buscar convocatorias** (antes «Mapeo automático») | Un botón para buscar lo nuevo; opciones avanzadas, búsqueda con Gemini y mantenimiento de fuentes más abajo |
+| **Cómo se usa** | Guía para usuarios nuevos: tareas paso a paso, glosario y preguntas frecuentes |
 | **Usuarios** | Crear usuarios y asignar perfiles (solo el administrador) |
 
 **Perfiles:**
@@ -43,7 +44,7 @@ La base es un archivo SQLite (`datos/convocatorias.db`) con las convocatorias, e
 
 ```bash
 pip install -r requirements.txt
-python -m pytest pruebas -q        # debe decir "100 passed"
+python -m pytest pruebas -q        # debe decir "102 passed"
 ```
 
 ## Puesta en marcha (una sola vez)
@@ -59,11 +60,11 @@ Para volver a migrar desde cero: `python mapeo.py migrar ruta/al/export.csv --re
 
 ### Importación masiva posterior
 
-Si más adelante necesitas traer otro export de Airtable, usa la página **Base y calidad → Importación masiva desde Airtable** (administrador), o el comando `python mapeo.py importar export.csv`. Solo se agregan las convocatorias que aún no están en el sistema, comparadas por enlace y por nombre, y se corrigen igual que en la migración. Por defecto todas van a la bandeja de revisión.
+Si más adelante necesitas traer otro export de Airtable, usa la página **Base de convocatorias → Importación masiva desde Airtable** (administrador), o el comando `python mapeo.py importar export.csv`. Solo se agregan las convocatorias que aún no están en el sistema, comparadas por enlace y por nombre, y se corrigen igual que en la migración. Por defecto todas van a la bandeja de revisión.
 
 ### Descargar la base
 
-En **Base y calidad → Todo lo registrado en Excel** se descarga un libro con todos los campos y una hoja por estado:
+En **Base de convocatorias → Todo lo registrado en Excel** se descarga un libro con todos los campos y una hoja por estado:
 - Base,
 - Por revisar,
 - Actor pendiente,
@@ -123,7 +124,7 @@ Si un administrador pierde el acceso y no tiene códigos, en la pantalla de ingr
 ## Desplegar en Hugging Face (cuando haya plan)
 
 **Para pasar los datos de GitHub a Hugging Face:**
-1. En **Base y calidad**, descargar la *copia de seguridad de la base (.db)*.
+1. En **Base de convocatorias**, descargar la *copia de seguridad de la base (.db)*.
 2. Ponerla en `datos/convocatorias.db`.
 3. Seguir los pasos de abajo.
 
@@ -187,7 +188,7 @@ Las correcciones que no tenían duda se aplicaron solas al migrar. Lo que necesi
 - convocatorias marcadas como permanentes pero con fecha límite,
 - posibles duplicados.
 
-En la página **Base y calidad** se filtran por regla y se corrigen una por una; el panel de calidad se actualiza mientras se edita. Las duplicadas se retiran con un motivo.
+En la página **Base de convocatorias** se filtran por regla y se corrigen una por una; el panel de calidad se actualiza mientras se edita. Las duplicadas se retiran con un motivo.
 
 ### Auditar un export antes de migrar
 
@@ -199,11 +200,50 @@ python mapeo.py auditar ruta/al/export.csv
 
 Muchas becas y subvenciones abren cada año con el mismo enlace. **Cada año es una edición nueva y se registra.** Lo que el sistema impide es registrar dos veces la misma convocatoria **en el mismo año**:
 - **Año de la convocatoria:** se toma de la fecha límite; si no hay, de la fecha de apertura; si tampoco, de la fecha de registro.
-- **Mismo enlace y mismo año:** es un duplicado. El mapeo no la vuelve a enviar a la bandeja, y si se registra a mano es un error.
-- **Nombre casi igual en el mismo año:** sale una alerta para revisarlo.
+- **Mismo enlace y mismo año:** es un duplicado. El enlace se compara «limpio»: sin http/https, sin www., sin #ancla, sin
+  parámetros de rastreo (utm_…), sin prefijo de idioma (/en/, /es/…) ni index.html. Si se registra a mano es un error.
+- **Nombre casi igual en el mismo año (y del mismo oferente):** se compara el nombre completo, el nombre en español y el original entre paréntesis
+  (así «Premio Earthshot (The Earthshot Prize)» coincide con «The Earthshot Prize»). Si se registra a mano sale una alerta;
+  lo que llega solo (mapeo y Gemini) **no entra**.
+- **Ediciones o rondas distintas:** «28ª convocatoria» y «29ª convocatoria», o «Ronda 1» y «Ronda 2», no son duplicados.
+- **Limpieza automática:** al empezar cada búsqueda se descartan, con el motivo «Duplicado», las copias del mismo año que
+  llegaron solas y que nadie ha editado.
 - **Mismo enlace de otro año:** es una **nueva edición** y se permite. En la bandeja queda marcada como «Nueva edición» con el año de la anterior.
 - **Permanentes:** una convocatoria permanente es la misma mientras siga abierta.
 - **Descartadas:** lo descartado este año tampoco vuelve a llegar a la bandeja.
+
+## Páginas que reúnen varias convocatorias
+
+Muchas páginas («Becas», «Convocatorias abiertas») muestran cada convocatoria en un **desplegable, una pestaña o una sección**
+de la misma página, sin una página aparte (por ejemplo, https://tec.mx/es/profesional/becas). El mapeo las detecta y **separa
+cada convocatoria**: la analiza con su propio título, sus fechas, sus requisitos y su elegibilidad, y la registra con el enlace
+de la página más el ancla de la sección (`…/becas#beca-al-talento-academico`). La página general no se registra.
+
+- Las secciones generales (fechas importantes, calendario, cómo aplicar) se le pasan a Gemini como contexto; no reemplazan
+  las fechas propias de cada convocatoria.
+- Las secciones que no son convocatorias (requisitos, preguntas frecuentes, contacto…) se ignoran.
+- Una sección que exige **otra nacionalidad** («Nacionalidad mexicana», «must be a US citizen») se descarta como no
+  elegible, salvo que la misma convocatoria nombre a Colombia o a América Latina.
+- Si el contenido de los desplegables solo aparece al hacer clic (se carga con JavaScript), la página tiene que leerse con
+  navegador: marcar la fuente con «Requiere navegador» en la configuración (necesita Playwright en el servidor).
+
+## Control de entrada: lo automático llega en español y completo
+
+Lo que encuentra el sistema solo (mapeo y búsqueda con Gemini) **solo pasa a la bandeja si llega en español y con los campos
+obligatorios completos**, con las mismas reglas de validación que se aplican al revisar. Si no, queda en el estado
+**Por completar**, que no aparece en la bandeja, con la lista de lo que le falta.
+
+- **Qué se exige:** nombre, descripción, objetivos, requisitos (al menos dos criterios con contenido), observaciones de la fecha
+  y del financiamiento en español; ninguna regla en rojo, salvo las que siempre confirma una persona (las verificaciones de la
+  lista de chequeo y el actor en CICLOPE); y nombre traducido con el original entre paréntesis.
+- **Gemini traduce y completa:** lee la página oficial y escribe todo en español; los textos que el sistema leyó en otro idioma
+  se reemplazan por su traducción.
+- **Reintentos:** al empezar cada búsqueda, el sistema reintenta las «Por completar» (hasta 4 veces); las que quedan completas
+  pasan a la bandeja. También se puede pulsar **Reintentar ahora** en *Buscar convocatorias*, o
+  `python mapeo.py completar-pendientes`.
+- **Sin Gemini** (sin clave, sin cupo o con el interruptor apagado) lo que está en otro idioma no puede pasar: espera.
+- **Lo que ya llegó a la bandeja** solo, en otro idioma o incompleto, y que nadie ha editado, vuelve a «Por completar» en la
+  siguiente búsqueda. Lo que una persona ya editó no se mueve. Lo migrado de Airtable no se toca.
 
 ## Bandeja de revisión
 
@@ -212,7 +252,7 @@ Muchas becas y subvenciones abren cada año con el mismo enlace. **Cada año es 
 | Por revisar | Vista de trabajo, con estas partes: <ul><li>**Indicadores:** por revisar, llegadas en los últimos 7 días, cierran en 30 días, sin errores y nuevas ediciones.</li><li>**Filtros:** origen (mapeo automático, Gemini, manual, Airtable), modalidad, cierre, elegibilidad, texto y «solo sin errores».</li><li>**Tabla:** con semáforo de cierre y enlace a la página oficial. Una fila marcada abre su revisión completa; varias marcadas se **descartan en bloque** con un motivo de la lista.</li></ul> Para aprobar hay que marcar la lista de chequeo de 11 puntos y no tener errores |
 | Actores pendientes | Actores que faltan en CICLOPE, con descarga de sus datos para el sistema de creación de actores. Al registrar uno como creado, sus convocatorias ya revisadas entran solas a la base |
 | Registrar convocatoria | Reemplaza el formulario de Airtable, con las mismas listas y validaciones |
-| En la base | Convocatorias ya aprobadas (se corrigen en "Base y calidad") |
+| En la base | Convocatorias ya aprobadas (se corrigen en "Base de convocatorias") |
 | Descartadas | Convocatorias descartadas y su motivo |
 | Catálogo de actores | Consultarlo; el administrador edita tipo, estado y alias |
 
@@ -292,10 +332,14 @@ Las ejecuciones (validar fuentes, mapeo y búsqueda con Gemini) **corren en segu
 - Lo encontrado se guarda **fuente por fuente**: las convocatorias llegan a la bandeja mientras corre, y la validación guarda su avance cada 10 fuentes.
 - Si el servidor se reinicia a mitad de camino, la página lo avisa. Al volver a ejecutarla, no se repite lo que ya está en el sistema.
 
-Desde la página **Mapeo automático**:
+Desde la página **Buscar convocatorias**:
 
 1. **Validar fuentes** (la primera vez y una vez al mes): comprueba que cada sitio responda, que no redirija a otro dominio, que se identifique con el nombre del oferente y encuentra su página de convocatorias.
-2. **Ejecutar mapeo ahora**: se puede elegir qué grupos revisar. Con todas las fuentes (más de 200) tarda alrededor de una hora; se recomienda un grupo por día. Revisa 6 fuentes a la vez, respetando 3 segundos entre páginas del mismo sitio.
+2. **Ejecutar mapeo ahora**: se puede elegir qué grupos revisar.
+   - **Modo rápido**, el normal: solo abre las convocatorias que no ha visto antes. Las conocidas se marcan como «siguen publicadas» sin volver a abrirlas. Cada fuente tiene además una **revisión completa automática cada 30 días**, para detectar cambios de fecha y nuevas ediciones con el mismo enlace. La primera corrida siempre es completa.
+   - **Revisión completa**, con el interruptor de la página: vuelve a abrir todo.
+   - **Se saltan las fuentes que fallaron en la última validación:** sitio bloqueado, sin respuesta o redirigido.
+   - **Velocidad**, en la página: cuántas fuentes a la vez (10 por defecto) y la pausa entre páginas del mismo sitio (2 segundos). Con todas las fuentes (más de 200) tarda alrededor de una hora; se recomienda un grupo por día. Revisa 6 fuentes a la vez, respetando 3 segundos entre páginas del mismo sitio.
 
 Desde la terminal: `python mapeo.py validar-fuentes`, `python mapeo.py mapear --grupo "Gobiernos y agencias"`, o `--fuente OFE-012`.
 
@@ -311,7 +355,7 @@ Desde la terminal: `python mapeo.py validar-fuentes`, `python mapeo.py mapear --
 
 ### Búsqueda externa con Gemini (cuando se requiera)
 
-El mapeo solo revisa las fuentes configuradas. Para encontrar convocatorias en **otros sitios oficiales**, la página **Mapeo automático → 3. Búsqueda externa con Gemini** le pide a Gemini (con búsqueda de Google) convocatorias abiertas a Colombia, con estas condiciones en la instrucción:
+El mapeo solo revisa las fuentes configuradas. Para encontrar convocatorias en **otros sitios oficiales**, la página **Buscar convocatorias → Buscar en otros sitios oficiales (con Gemini)** le pide a Gemini (con búsqueda de Google) convocatorias abiertas a Colombia, con estas condiciones en la instrucción:
 - solo sitios oficiales del oferente: nada de agregadores, acortadores, redes sociales ni noticias;
 - Colombia elegible, con la frase de la página que lo prueba;
 - convocatoria abierta o permanente;
@@ -334,7 +378,7 @@ Quedan para quien revisa las verificaciones, la priorización, el acompañamient
 
 Para activarla:
 1. Crear una clave en Google AI Studio y agregarla como secreto `GEMINI_API_KEY`.
-2. El modelo se elige en la hoja **Parametros → Modelo de Gemini**, o con el secreto `GEMINI_MODEL`. Por defecto es `gemini-2.5-flash`, que incluye búsquedas de Google gratuitas en el plan gratuito de la API. Google cambia los modelos con frecuencia: si deja de responder, se pone el vigente.
+2. El modelo se elige en la hoja **Parametros → Modelo de Gemini**, o con el secreto `GEMINI_MODEL`. Por defecto es `gemini-3.8-flash` (gratuito en el plan gratuito de la API, dentro de sus límites). Si Google retira el modelo configurado, el sistema usa automáticamente el que Google sugiere en su respuesta y lo avisa en el registro. Ojo: en algunos modelos la búsqueda en Google de Gemini (paso 3, búsqueda externa) puede exigir facturación activa; el completado de campos del mapeo no busca en Google y no la necesita. En la página de Mapeo, el interruptor **Completar campos con Gemini** permite apagarlo en una corrida.
 
 Desde la terminal: `python mapeo.py buscar-externo --modalidad Subvención --tema "cambio climático"`.
 
@@ -375,7 +419,7 @@ Cada actor del catálogo tiene su **sitio web oficial** (uno o varios dominios s
 - **Otro sitio** que no es del actor, o un formulario puesto como sitio del oferente: alerta.
 - Los parámetros de rastreo (`?utm_source=chatgpt.com`) se quitan solos.
 
-Las convocatorias marcadas se corrigen en **Base y calidad**, filtrando por la regla R17.
+Las convocatorias marcadas se corrigen en **Base de convocatorias**, filtrando por la regla R17.
 
 ## Archivos
 

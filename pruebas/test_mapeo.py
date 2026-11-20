@@ -96,10 +96,26 @@ def test_mapeo_completo(entorno, tmp_path):
     assert motivos["ICETEX Utrecht scholarship for Colombians"].startswith("Está en ICETEX")
     assert motivos["Summer school scholarship 2026"].startswith("Convocatoria vencida")
 
-    # Segunda corrida: nada es nuevo
+    # Segunda corrida, modo rápido: no vuelve a abrir lo que ya conoce, y no lo da por retirado
     ruta2 = correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY)
     rev2 = pd.read_excel(ruta2, sheet_name="Revisión", dtype=str)
-    assert set(rev2["[Sistema] Estado"]) == {"Sin cambios"}
+    assert len(rev2) == 0
+    assert len(pd.read_excel(ruta2, sheet_name="Ya no aparecen", dtype=str)) == 0
+    # Revisión completa: vuelve a abrir todo y lo encuentra sin cambios
+    ruta3 = correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY, "--completo")
+    rev3 = pd.read_excel(ruta3, sheet_name="Revisión", dtype=str)
+    assert set(rev3["[Sistema] Estado"]) == {"Sin cambios"}
+
+
+def test_revision_completa_automatica_cada_30_dias(entorno):
+    """El modo rápido se salta lo conocido, pero cada fuente tiene revisión completa cada 30 días."""
+    correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY)
+    rapida = pd.read_excel(correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", "2026-11-20"),
+                           sheet_name="Revisión", dtype=str)
+    assert len(rapida) == 0
+    completa = pd.read_excel(correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", "2026-12-20"),
+                             sheet_name="Revisión", dtype=str)
+    assert len(completa) > 0  # pasaron 30 días: se vuelven a abrir todas
 
 
 def test_duplicado_con_airtable(entorno, tmp_path):
@@ -138,15 +154,57 @@ def test_mapeo_envia_a_la_bandeja_sin_tocar_la_base(entorno, tmp_path):
     from bandeja.almacen import AlmacenSQLite
     correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY)
     a = AlmacenSQLite(tmp_path / "base.db")
-    items = a.items("Por revisar")
+    # sin Gemini, lo que está en inglés no pasa a la bandeja: queda «Por completar», fuera de la vista de revisión
+    assert not [i for i in a.items("Por revisar") if "Scholarships" in i["datos"]["Nombre de la Convocatoria"]]
+    items = a.items("Por completar")
     nombres = {i["datos"]["Nombre de la Convocatoria"] for i in items}
     assert "Utrecht Excellence Scholarships" in nombres
     assert "Holland grant for EU students" not in nombres          # descartada automáticamente
+    assert all(i["meta"]["faltantes"] for i in items)              # dice qué le falta
     assert all(i["datos"]["VERIFICACIÓN: Colombia hace parte de los países beneficiarios"] == "" for i in items)
     assert a.base() == []                                              # nada entra a la base sin revisión
-    # una segunda corrida no duplica la bandeja
+    # una segunda corrida no duplica nada
+    total = len(a.items())
     correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY)
-    assert len(a.items()) == len(items)
+    assert len(a.items()) == total
+
+
+def test_por_completar_pasa_a_la_bandeja_cuando_gemini_la_completa(entorno, tmp_path, monkeypatch):
+    """Lo que quedó en inglés se reintenta en la siguiente búsqueda; con Gemini queda en español y completo y pasa."""
+    from bandeja.almacen import AlmacenSQLite
+    correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY, "--grupo", "Universidades y centros de investigación")
+    a = AlmacenSQLite(tmp_path / "base.db")
+    url_utrecht = lambda i: i["datos"]["Cómo aplicar"].endswith("utrecht-excellence-scholarships")  # noqa: E731
+    assert any(url_utrecht(i) for i in a.items("Por completar"))
+    monkeypatch.setenv("MAPEO_GEMINI_PRUEBA_COMPLETAR", str(RAIZ / "pruebas" / "gemini_completar.json"))
+    correr("completar-pendientes", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY)
+    item = next(i for i in a.items("Por revisar") if url_utrecht(i))
+    assert item["datos"]["Nombre de la Convocatoria"] == "Becas de Excelencia de Utrecht (Utrecht Excellence Scholarships)"
+    assert item["datos"]["Observaciones a la fecha límite de aplicación"].startswith("La fecha límite corresponde")
+    assert "Perfil de los aspirantes: Estudiantes" in item["datos"]["Requisitos y condiciones de participación"]
+
+
+def test_limpieza_de_la_bandeja(entorno, tmp_path):
+    """Lo automático que nadie ha tocado: los duplicados del mismo año se descartan y lo que está en otro idioma sale
+    de la bandeja. Lo que una persona ya editó no se mueve."""
+    from bandeja import flujo as F
+    from bandeja.almacen import AlmacenSQLite
+    a = AlmacenSQLite(tmp_path / "base.db")
+    base = {"Nombre de la Convocatoria": "Becas EPOS (EPOS Scholarships)", "Cómo aplicar": "https://www.daad.de/es/epos/",
+            "Fecha Límite de Aplicación": "1/3/2027", "¿La convocatoria es permanente?": "No", "Descripción": "x"}
+    original, _ = F.ingresar(a, base, "Mapeo automático · X", "Mapeo automático")
+    copia, _ = F.ingresar(a, base | {"Cómo aplicar": "http://daad.de/en/epos?utm_source=x"}, "Mapeo automático · X", "Mapeo automático")
+    ingles, _ = F.ingresar(a, base | {"Nombre de la Convocatoria": "Research Fellowship for young leaders",
+                                       "Cómo aplicar": "https://otra.org/f", "Descripción": "This programme supports researchers from developing countries who want to apply."},
+                           "Mapeo automático · Y", "Mapeo automático")
+    editada, _ = F.ingresar(a, base | {"Nombre de la Convocatoria": "Training Week for the public sector", "Cómo aplicar": "https://t.org/w"},
+                            "Mapeo automático · Z", "Mapeo automático")
+    F.guardar_cambios(a, editada, editada["datos"], "Ana")
+    duplicadas, devueltas = programa.limpiar_bandeja(a)
+    assert a.item(copia["id"])["estado"] == "Descartada" and "Duplicado" in a.item(copia["id"])["observacion"]
+    assert a.item(ingles["id"])["estado"] == "Por completar"
+    assert a.item(editada["id"])["estado"] == "Por revisar"   # la tocó una persona
+    assert duplicadas == 1
 
 
 # --- configuración y fuentes oficiales ---------------------------------------
@@ -307,7 +365,7 @@ def test_ejecucion_en_segundo_plano(entorno, tmp_path):
     tareas.actual().hilo.join(120)
     t = tareas.actual()
     assert t.estado == "Terminada", t.lineas[-5:]
-    assert A.items("Por revisar")  # llegó a la bandeja de la base compartida
+    assert A.items("Por revisar") or A.items("Por completar")  # llegó a la base compartida
     assert A.leer_archivo("ultimo_mapeo.xlsx") and A.leer_archivo("historial_mapeo.json")
     assert json.loads(A.leer_archivo("tarea_actual.json"))["estado"] == "Terminada"
     assert tareas.interrumpida(A) is None
@@ -326,3 +384,55 @@ def test_mapeo_admite_nueva_edicion_de_otro_anio():
     url = "https://www.uu.nl/en/masters/scholarships/utrecht-excellence-scholarships"
     assert idx.revisar("Utrecht Excellence Scholarships", url, {"Fecha Límite de Aplicación": "1/2/2027"}).startswith("Nueva edición")
     assert idx.revisar("Utrecht Excellence Scholarships", url, {"Fecha Límite de Aplicación": "15/1/2026"}).startswith("Ya está en la base")
+
+
+def test_se_saltan_fuentes_que_fallaron_en_la_validacion():
+    import argparse
+    from motor import config as C
+    cfg = C.cargar()
+    activas = [f for f in cfg.fuentes if f.activa]
+    activas[0].estado_validacion = "Sitio no responde (403)"
+    activas[1].estado_validacion = "Bloqueado por robots.txt"
+    ids = {f.id for f in programa.fuentes_a_revisar(cfg, argparse.Namespace())}
+    assert activas[0].id not in ids and activas[1].id not in ids and activas[2].id in ids
+    assert activas[0].id in {f.id for f in programa.fuentes_a_revisar(cfg, argparse.Namespace(todas=True))}
+
+
+def test_pagina_con_varias_becas_se_separa_una_por_una():
+    """Páginas como tec.mx/es/profesional/becas: cada beca está en un desplegable de la misma página. Se analiza cada
+    una por separado (con su enlace #ancla, sus fechas y su elegibilidad), no la página general."""
+    import argparse
+    from motor import config as C
+    from motor import reglas as RG
+    cfg = C.cargar()
+    fuente = C.Fuente(id="TEC", activa=True, tipo="Universidad", nombre="Tecnológico de Monterrey", pais="México",
+                      dominio="https://tec.mx", url_becas="https://tec.mx/es/profesional/becas", oficial="No Oficial",
+                      idioma="es", requiere_navegador=False, fila=0, modalidades=["Beca"])
+    args = argparse.Namespace(hoy=date(2026, 11, 20), prueba=str(PAGINAS), pausa=0, todas=False)
+
+    class SinIcetex:
+        def revisar(self, *a):
+            return False, ""
+    res = programa.revisar_fuente(fuente, cfg, args, SinIcetex(), RG.IndiceAirtable(None, 90))
+    por_url = {url: (tipo, fila, motivo) for tipo, url, fila, motivo in res["hallazgos"]}
+    assert set(por_url) == {"https://tec.mx/es/profesional/becas#beca-al-talento-academico",
+                            "https://tec.mx/es/profesional/becas#beca-socioeconomica",
+                            "https://tec.mx/es/profesional/becas#beca-liderazgo",
+                            "https://tec.mx/es/profesional/becas#beca-internacional",
+                            "https://tec.mx/es/profesional/becas/beca-lideres-del-manana"}  # ni la página general ni las preguntas
+    tipo, fila, _ = por_url["https://tec.mx/es/profesional/becas#beca-al-talento-academico"]
+    assert tipo == "revision" and fila["Nombre de la Convocatoria"] == "Beca al Talento Académico"
+    assert fila["Fecha Límite de Aplicación"] == "15/3/2027"                            # la fecha de esa beca
+    tipo, fila, motivo = por_url["https://tec.mx/es/profesional/becas#beca-socioeconomica"]
+    assert tipo == "descartada" and "nacionalidad mexicana" in motivo.lower()          # solo para mexicanos: no sirve
+    tipo, fila, _ = por_url["https://tec.mx/es/profesional/becas#beca-liderazgo"]
+    assert tipo == "revision" and fila["Fecha Límite de Aplicación"] == "30/4/2027"
+    assert fila["[Sistema] Elegibilidad Colombia"] == "Elegible"
+    # la beca para alumnos internacionales sí sirve: está abierta a extranjeros y no exige una nacionalidad
+    tipo, fila, _ = por_url["https://tec.mx/es/profesional/becas#beca-internacional"]
+    assert tipo == "revision" and fila["[Sistema] Elegibilidad Colombia"] == "Elegible"
+    assert fila["Nombre de la Convocatoria"] == "Beca internacional (para alumnos internacionales)"
+    assert fila["Fecha Límite de Aplicación"] == "31/5/2027"
+    # el enlace a otra página de beca también se sigue; esa exige nacionalidad mexicana
+    tipo, _, motivo = por_url["https://tec.mx/es/profesional/becas/beca-lideres-del-manana"]
+    assert tipo == "descartada" and "mexicana" in motivo.lower()

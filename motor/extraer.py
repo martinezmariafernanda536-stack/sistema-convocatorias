@@ -209,3 +209,117 @@ def analizar_beca(resp, fuente, cfg, hoy, texto_enlace=""):
         "correo": correo,
         "enlaces_icetex": [u for u, _ in _enlaces(resp.html, resp.url) if "icetex.gov.co" in u],
     }
+
+
+# --- páginas que reúnen varias convocatorias -----------------------------------
+# Muchas páginas («Becas», «Convocatorias abiertas») presentan cada convocatoria en un desplegable, una pestaña o una
+# sección con su propio título, sin una página aparte. Si se leen enteras salen como una sola convocatoria «general»,
+# sin fechas ni requisitos de cada una. Aquí se separan para analizarlas una por una.
+_GENERICOS = [
+    "requisito", "requirement", "beneficio", "benefit", "como aplicar", "como postular", "how to apply", "documento", "document",
+    "pregunta", "faq", "preguntas frecuentes", "fecha", "calendario", "deadline", "important dates", "contacto", "contact",
+    "proceso", "process", "criterio", "criteria", "eligib", "about", "acerca", "sobre ", "descripcion", "objetivo", "cobertura",
+    "coverage", "seleccion", "selection", "terminos", "terms", "reglamento", "politica", "aviso", "noticias", "news",
+    "tambien te puede", "te puede interesar", "related", "conoce mas", "mas informacion", "more information",
+]
+_CONTEXTO = ["fecha", "fechas", "calendario", "plazo", "plazos", "periodo", "periodos", "convocatoria", "deadline", "deadlines",
+             "important dates", "timeline", "proceso", "how to apply", "como aplicar", "como solicitar"]
+
+
+def _limpiar_seccion(t):
+    t = re.sub(r"\s+", " ", t or "").strip()
+    t = re.sub(r"^(?:ir a|ver|conoce|conocer|mas sobre|más sobre|leer mas|leer más|go to|see|read more about)\s+", "", t, flags=re.I)
+    return re.sub(r"^\d{1,2}[.)-]\s*", "", t)  # «4. Beca de apoyo» → «Beca de apoyo»
+
+
+def _slug(t):
+    t = unicodedata.normalize("NFKD", t.lower()).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "-", t).strip("-")[:60]
+
+
+def _es_generico(titulo_norm):
+    return any(titulo_norm.startswith(g) or f" {g}" in titulo_norm[:25] for g in _GENERICOS)
+
+
+def _hermanos_hasta(encabezado):
+    """HTML de lo que sigue a un encabezado hasta el próximo encabezado del mismo nivel o superior."""
+    nivel = int(encabezado.name[1]) if re.fullmatch(r"h\d", encabezado.name or "") else 6
+    partes = []
+    for h in encabezado.find_next_siblings():
+        if re.fullmatch(r"h\d", h.name or "") and int(h.name[1]) <= nivel:
+            break
+        if h.find(re.compile(rf"^h[1-{nivel}]$")):
+            break
+        partes.append(str(h))
+    return "".join(partes)
+
+
+def secciones(html, url, terminos, minimo=2):
+    """Devuelve [(título, ancla, html_de_la_sección)] si la página reúne varias convocatorias; [] si es una sola."""
+    sopa = _sopa(html)
+    for t in sopa(["script", "style", "noscript", "svg", "nav", "header", "footer"]):
+        t.decompose()
+    vistas, anclas, salida = set(), set(), []
+
+    def agregar(titulo, ancla, contenido_html):
+        titulo = _limpiar_seccion(titulo)
+        tn = tx.normalizar(titulo)
+        texto = re.sub(r"\s+", " ", _sopa(contenido_html).get_text(" ")).strip()
+        if ancla and ancla in anclas:  # el mismo panel enlazado desde un índice y desde su botón
+            return
+        if not (6 <= len(titulo) <= 160) or len(texto) < 120 or tn in vistas or _es_generico(tn):
+            return
+        if not tx.alguno(tn, terminos):  # el título debe nombrar una convocatoria (beca, grant, premio…)
+            return
+        vistas.add(tn)
+        if ancla:
+            anclas.add(ancla)
+        salida.append((titulo, ancla or _slug(titulo), contenido_html))
+
+    # 1. desplegables y pestañas: un botón o enlace que abre un panel con id
+    for disparador in sopa.find_all(lambda e: e.has_attr("aria-controls") or e.has_attr("data-bs-target")
+                                    or e.has_attr("data-target") or (e.name == "a" and str(e.get("href", "")).startswith("#")
+                                                                     and len(e.get("href", "")) > 1)):
+        destino = (disparador.get("aria-controls") or disparador.get("data-bs-target") or disparador.get("data-target")
+                   or disparador.get("href") or "")
+        objetivo = destino.strip().lstrip("#").split()[0] if destino.strip().lstrip("#") else ""
+        panel = sopa.find(id=objetivo) if objetivo else None
+        if panel is not None and panel is not disparador and disparador not in panel.descendants:
+            agregar(disparador.get_text(" "), objetivo, str(panel))
+    # 2. <details><summary>
+    for d in sopa.find_all("details"):
+        s = d.find("summary")
+        if s:
+            titulo = s.get_text(" ")
+            s.extract()
+            agregar(titulo, d.get("id"), str(d))
+    # 3. secciones con encabezado (h2–h4) seguidas de su contenido
+    if len(salida) < minimo:
+        for h in sopa.find_all(["h2", "h3", "h4"]):
+            ancla = h.get("id") or (h.parent.get("id") if h.parent is not None and h.parent.name in ("section", "div", "article") else None)
+            agregar(h.get_text(" "), ancla, _hermanos_hasta(h))
+    if len(salida) < minimo:
+        return []
+    return salida
+
+
+def contexto_general(html, terminos):
+    """Texto de las secciones generales de la página (fechas, calendario, cómo aplicar) que vale para todas."""
+    sopa = _sopa(html)
+    for t in sopa(["script", "style", "noscript", "svg", "nav", "header", "footer"]):
+        t.decompose()
+    partes = []
+    for h in sopa.find_all(["h2", "h3", "h4", "summary", "button"]):
+        tn = tx.normalizar(h.get_text(" "))
+        if tx.alguno(tn, _CONTEXTO) and not tx.alguno(tn, terminos):
+            cuerpo = _hermanos_hasta(h) if re.fullmatch(r"h\d", h.name) else str(h.parent)
+            partes.append(_limpiar_seccion(h.get_text(" ")) + ": " + re.sub(r"\s+", " ", _sopa(cuerpo).get_text(" ")).strip())
+    return " ".join(partes)[:2500]
+
+
+def html_de_seccion(titulo, contenido_html, contexto="", lang=""):
+    """Página sintética con una sola convocatoria, para analizarla igual que una página propia."""
+    from html import escape
+    extra = f"<div><h2>Información general de la página</h2><p>{escape(contexto)}</p></div>" if contexto else ""
+    return (f"<html lang='{escape(lang)}'><head><title>{escape(titulo)}</title></head>"
+            f"<body><h1>{escape(titulo)}</h1>{contenido_html}{extra}</body></html>")

@@ -8,7 +8,27 @@ class Historial:
     def __init__(self, ruta):
         self.ruta = Path(ruta)
         self.datos = json.loads(self.ruta.read_text(encoding="utf-8")) if self.ruta.exists() else {}
+        self.completas = self.datos.pop("_revision_completa", {})  # fuente -> fecha de la última revisión completa
         self.vistas_hoy = set()
+
+    def conocidas(self):
+        return set(self.datos)
+
+    def marcar_visto(self, url, fuente_id, hoy):
+        """La convocatoria sigue publicada (modo rápido: no se volvió a abrir porque ya se conocía)."""
+        self.vistas_hoy.add(url)
+        d = self.datos.setdefault(url, {"fuente": fuente_id, "primera_vez": hoy, "titulo": ""})
+        d["ultima_vez"] = hoy
+
+    def dias_desde_completa(self, fuente_id, hoy):
+        from datetime import date
+        f = self.completas.get(fuente_id)
+        if not f:
+            return None
+        return (date.fromisoformat(hoy) - date.fromisoformat(f)).days
+
+    def marcar_completa(self, fuente_id, hoy):
+        self.completas[fuente_id] = hoy
 
     @staticmethod
     def huella(fila):
@@ -36,4 +56,5 @@ class Historial:
 
     def guardar(self):
         self.ruta.parent.mkdir(parents=True, exist_ok=True)
-        self.ruta.write_text(json.dumps(self.datos, ensure_ascii=False, indent=1), encoding="utf-8")
+        self.ruta.write_text(json.dumps(self.datos | {"_revision_completa": self.completas}, ensure_ascii=False, indent=1),
+                             encoding="utf-8")

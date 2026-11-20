@@ -46,10 +46,7 @@ por_estado = {e: [i for i in items if i["estado"] == e] for e in ("Por revisar",
 
 with st.sidebar:
     st.divider()
-    for e, lst in por_estado.items():
-        st.markdown(f"{e}: **{len(lst)}**")
-    st.divider()
-    if st.button("Actualizar bandeja"):
+    if st.button("Actualizar la lista", icon=":material/refresh:", help="Trae lo último que llegó de la búsqueda."):
         recargar()
 
 
@@ -59,9 +56,9 @@ CTX = Contexto(A, YO, catalogo_filas, BASE)
 
 
 # ---------------------------------------------------------------------------
-st.title("Bandeja de revisión")
-st.caption("Toda convocatoria, mapeada o registrada a mano, se revisa aquí antes de entrar a la base. "
-           "Si el actor no está creado en CICLOPE, la convocatoria espera hasta que se cree.")
+st.title("Revisar convocatorias")
+st.caption("Aquí llega todo lo que encuentra la búsqueda y lo que se registra a mano. Nada entra a la base sin que una persona "
+           "lo revise y lo apruebe.")
 
 n_actores_pend = sum(1 for f in catalogo_filas if f["estado_ciclope"] != "Creado en CICLOPE")
 t_rev, t_act, t_reg, t_pub, t_desc, t_cat = st.tabs([
@@ -98,8 +95,15 @@ def _fila_triaje(i, hoy):
 with t_rev:
     todas = por_estado["Por revisar"]
     if not todas:
-        st.success("No hay convocatorias por revisar.")
+        st.success("No hay convocatorias por revisar. 🎉")
+        st.page_link("paginas/mapeo.py", label="Buscar convocatorias nuevas", icon=":material/search:")
     else:
+        with st.expander("Cómo revisar, en 4 pasos", icon=":material/help:"):
+            st.markdown("1. **Marca una fila** de la tabla: abajo se abre su ficha.  \n"
+                        "2. **Abre la página oficial** y compara nombre, fechas, monto, requisitos y si Colombia puede postularse.  \n"
+                        "3. **Corrige lo que está en rojo** en el formulario (lo amarillo es solo un aviso).  \n"
+                        "4. **Marca la lista de chequeo y aprueba.** Si falta algo, el sistema te dice qué.  \n\n"
+                        "Para descartar varias a la vez (por ejemplo, las que ya cerraron), marca varias filas.")
         hoy = date.today()
         tabla = pd.DataFrame([_fila_triaje(i, hoy) for i in todas])
         tabla["Días"] = pd.to_numeric(tabla["Días"], errors="coerce").astype("Int64")
@@ -110,7 +114,7 @@ with t_rev:
                 (len(tabla), "por revisar"),
                 (int(((tabla["Origen"] != "Airtable") & (tabla["Llegó"] >= hace7)).sum()), "llegaron en los últimos 7 días"),
                 (int(((dias(tabla, -1) >= 0) & (dias(tabla, -1) <= 30)).sum()), "cierran en 30 días o menos"),
-                (int((tabla["Errores"] == 0).sum()), "sin errores pendientes"),
+                (int((tabla["Errores"] == 0).sum()), "completas, listas para aprobar"),
                 (int((tabla["Edición"] != "").sum()), "nuevas ediciones de años anteriores")]):
             col.markdown(f"<div class='kpi'><div class='v'>{v}</div><div class='l'>{lab}</div></div>", unsafe_allow_html=True)
         st.write("")
@@ -118,13 +122,21 @@ with t_rev:
         origenes = f1.multiselect("Origen", ["Mapeo automático", "Búsqueda con Gemini", "Registro manual", "Airtable"],
                                   placeholder="Todos")
         modalidades = f2.multiselect("Modalidad", sorted(tabla["Modalidad"].unique()), placeholder="Todas")
-        cierre = f3.selectbox("Cierre", ["Todas", "Cierra en 30 días o menos", "Con más de un mes y una semana",
-                                         "Sin fecha o permanente", "Ya cerró"])
+        OPC_CIERRE = ["Todas", "Abiertas", "Cierra en 30 días o menos", "Con más de un mes y una semana",
+                      "Sin fecha o permanente", "Ya cerró"]
+        n_cerradas = int((dias(tabla, 0) < 0).sum())
+        if n_cerradas and st.session_state.get("f_cierre", "Todas") == "Todas":
+            a1, a2 = st.columns([4, 1.2])
+            a1.warning(f"**{n_cerradas} convocatorias ya cerraron.** Puedes verlas juntas y descartarlas de una vez.")
+            if a2.button("Mostrar las cerradas", width="stretch"):
+                st.session_state["f_cierre"] = "Ya cerró"
+                st.rerun()
+        cierre = f3.selectbox("Cierre", OPC_CIERRE, key="f_cierre")
         orden = f4.selectbox("Ordenar por", ["Cierre más próximo", "Más recientes", "Menos errores", "Oferente"])
         g1, g2, g3 = st.columns([2.2, 1.2, 1.1])
         buscar = g1.text_input("Buscar por nombre u oferente", placeholder="Ej.: DAAD, clima, maestría")
         elegs = g2.multiselect("Elegibilidad automática", ["Elegible", "Probable", "Revisar"], placeholder="Todas")
-        solo_listas = g3.toggle("Solo sin errores")
+        solo_listas = g3.toggle("Solo las completas", help="Las que no tienen nada en rojo por corregir.")
         v = tabla.copy()
         if origenes:
             v = v[v["Origen"].isin(origenes)]
@@ -137,7 +149,9 @@ with t_rev:
         if buscar:
             b = buscar.lower()
             v = v[v["Convocatoria"].str.lower().str.contains(b, regex=False) | v["Oferente"].str.lower().str.contains(b, regex=False)]
-        if cierre == "Cierra en 30 días o menos":
+        if cierre == "Abiertas":
+            v = v[dias(v, 0) >= 0]
+        elif cierre == "Cierra en 30 días o menos":
             v = v[(dias(v, -1) >= 0) & (dias(v, -1) <= 30)]
         elif cierre == "Con más de un mes y una semana":
             v = v[dias(v, -1) > 37]
@@ -145,18 +159,26 @@ with t_rev:
             v = v[v["Días"].isna()]
         elif cierre == "Ya cerró":
             v = v[dias(v, 0) < 0]
-        v = {"Cierre más próximo": v.assign(_o=dias(v, 10_000)).sort_values(["_o", "Convocatoria"]).drop(columns="_o"),
+        # abiertas primero (la más próxima arriba), luego sin fecha, y al final las que ya cerraron
+        orden_cierre = dias(v, 10_000).where(dias(v, 10_000) >= 0, 20_000 - dias(v, 0))
+        v = {"Cierre más próximo": v.assign(_o=orden_cierre).sort_values(["_o", "Convocatoria"]).drop(columns="_o"),
              "Más recientes": v.sort_values("Llegó", ascending=False), "Menos errores": v.sort_values(["Errores", "Alertas"]),
              "Oferente": v.sort_values("Oferente")}[orden]
         st.caption(f"{len(v)} de {len(tabla)} convocatorias · marca una fila para revisarla; marca varias para descartarlas juntas. "
                    "🔴 cierra en menos de 15 días · 🟠 en un mes y una semana o menos · 🟢 con más plazo.")
+        vista = v.drop(columns="id").assign(Días=[str(int(d)) if pd.notna(d) and d >= 0 else "" for d in v["Días"]])  # en las cerradas basta con «🔴 Cerrada»
         evento = st.dataframe(
-            v.drop(columns="id"), hide_index=True, width="stretch", height=min(560, 38 + 35 * max(len(v), 1)),
+            vista, hide_index=True, width="stretch", height=min(560, 38 + 35 * max(len(v), 1)),
             on_select="rerun", selection_mode="multi-row", key="tabla_triaje",
             column_config={"Página": st.column_config.LinkColumn("Página", display_text="Abrir ↗"),
-                           "Días": st.column_config.NumberColumn("Días para cierre", format="%d"),
+                           "Cierre": st.column_config.TextColumn("Cierre", width=110),
+                           "Días": st.column_config.TextColumn("Días para cierre", width=110),
                            "Convocatoria": st.column_config.TextColumn(width="large"),
-                           "Errores": st.column_config.NumberColumn(format="%d"), "Alertas": st.column_config.NumberColumn(format="%d")})
+                           "Listo": st.column_config.TextColumn("Completa", help="✅ = no tiene nada en rojo por corregir"),
+                           "Elegibilidad": st.column_config.TextColumn("¿Colombia elegible?",
+                                                                     help="Lo que leyó el sistema: Elegible, Probable o Revisar"),
+                           "Errores": st.column_config.NumberColumn("Por corregir", format="%d", help="Datos en rojo: obligatorios"),
+                           "Alertas": st.column_config.NumberColumn("Avisos", format="%d", help="Datos en amarillo: conviene mirarlos")})
         filas_sel = evento.selection.rows if evento and evento.selection else []
         ids_sel = [v.iloc[n]["id"] for n in filas_sel if n < len(v)]
         if len(ids_sel) > 1 and PUEDE_REVISAR:
@@ -184,17 +206,19 @@ with t_rev:
                 datos = formulario(CTX, item["datos"], f"r_{item['id']}_")
             with der:
                 info_mapeo(item)
+                st.markdown("<div class='paso'>① Comparar con la página oficial</div>", unsafe_allow_html=True)
                 enlace = datos.get("Cómo aplicar", "")
                 if enlace.startswith("http"):
-                    st.link_button("Abrir la página oficial", enlace, width="stretch")
+                    st.link_button("Abrir la página oficial", enlace, width="stretch", icon=":material/open_in_new:")
                 if st.button("Comprobar que los enlaces funcionan", key="ce_" + item["id"], width="stretch"):
                     with st.spinner("Abriendo los enlaces…"):
                         st.session_state["enl_" + item["id"]] = F.comprobar_enlaces(datos)
                 for campo, url, estado, ok in st.session_state.get("enl_" + item["id"], []):
                     (st.success if ok else st.error)(f"{'✓' if ok else '✗'} {campo}: {estado}\n\n{url[:90]}")
-                st.markdown("#### Calidad del dato")
+                st.markdown("<div class='paso'>② Qué falta corregir</div>", unsafe_allow_html=True)
+                st.caption("Rojo: obligatorio antes de aprobar. Amarillo: conviene mirarlo. Se corrige en el formulario de la izquierda.")
                 norm, hallazgos = panel_validacion(CTX, datos)
-                st.markdown("#### Lista de chequeo")
+                st.markdown("<div class='paso'>③ Lista de chequeo</div>", unsafe_allow_html=True)
                 chequeo = {c: st.checkbox(c, key=f"chk_{item['id']}_{n}") for n, c in enumerate(F.LISTA_CHEQUEO)}
                 with st.container(border=True):
                     st.markdown("**Socialización** · aparte de la validación")
@@ -204,10 +228,12 @@ with t_rev:
                         sug = bool(norm.get("Se sugiere para priorización"))
                         st.markdown(("⭐ **Se sugiere para socializar.** " if sug else "**No se sugiere para socializar.** ")
                                     + norm[R.CAMPO_MOTIVO_PRIORIZACION])
-                if st.button("Guardar cambios", key="g_" + item["id"], width="stretch"):
+                if st.button("Guardar cambios sin aprobar", key="g_" + item["id"], width="stretch",
+                             help="Guarda lo corregido y deja la convocatoria en revisión para terminarla después."):
                     F.guardar_cambios(A, item, datos, YO["nombre"])
                     st.toast("Cambios guardados")
                     recargar()
+                st.markdown("<div class='paso'>④ Aprobar o descartar</div>", unsafe_allow_html=True)
                 if PUEDE_REVISAR:
                     if st.button("Aprobar y enviar a la base", type="primary", key="a_" + item["id"], width="stretch"):
                         try:
@@ -298,7 +324,7 @@ with t_reg:
 
 with t_pub:
     aprobadas = sorted(por_estado["Aprobada"], key=lambda i: i["ingreso"], reverse=True)
-    st.caption("Convocatorias que ya están en la base. Se consultan y corrigen en la página 'Base y calidad'.")
+    st.caption("Convocatorias que ya están en la base. Se consultan y corrigen en la página «Base de convocatorias».")
     if aprobadas:
         st.dataframe(pd.DataFrame([{"Convocatoria": i["datos"].get("Nombre de la Convocatoria"), "Actor": i["datos"].get("Nombre de la Fuente"),
                                     "Carácter": i["datos"].get("Oficial / No Oficial"), "Revisada por": i.get("revisado_por", ""),

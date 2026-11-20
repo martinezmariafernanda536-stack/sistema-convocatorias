@@ -32,7 +32,43 @@ from .config import MODALIDADES, Fuente, modalidad_de
 
 log = logging.getLogger("mapeo")
 URL_API = "https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent"
-MODELO_POR_DEFECTO = "gemini-2.5-flash"
+MODELO_POR_DEFECTO = "gemini-3.8-flash"
+URL_MODELOS = "https://generativelanguage.googleapis.com/v1beta/models"
+# Modelo que de verdad respondió en esta sesión (si Google retiró el configurado, se usa el que Google sugiere).
+_REEMPLAZO = {}
+# Se activa cuando Gemini no puede usarse en esta corrida (clave inválida, sin modelo, límite diario):
+# así no se repite el mismo error en cada convocatoria.
+SUSPENDIDO = {"motivo": ""}
+
+
+def reiniciar_corrida():
+    SUSPENDIDO["motivo"] = ""
+
+
+def _modelo_sugerido(mensaje, clave):
+    """Cuando Google retira un modelo, su mensaje dice cuál usar ('use models/XXX'). Si no lo dice,
+    se consulta la lista de modelos y se toma el Flash más reciente que sirva para generateContent."""
+    m = re.search(r"models/([\w.\-]+?)(?=[\s,;)]|\.(?:\s|$)|$)", mensaje.split("use", 1)[-1]) if "use" in mensaje else None
+    if m:
+        return m.group(1)
+    try:
+        r = requests.get(URL_MODELOS, headers={"x-goog-api-key": clave}, timeout=30, params={"pageSize": 200})
+        nombres = [x.get("name", "").replace("models/", "") for x in r.json().get("models", [])
+                   if "generateContent" in x.get("supportedGenerationMethods", [])]
+    except (requests.RequestException, ValueError):
+        return None
+    flash = [n for n in nombres if "flash" in n and "lite" not in n and "preview" not in n and "image" not in n
+             and "tts" not in n and "live" not in n]
+
+    def version(n):
+        v = re.search(r"gemini-(\d+)(?:\.(\d+))?", n)
+        return (int(v.group(1)), int(v.group(2) or 0)) if v else (0, 0)
+    return max(flash, key=version) if flash else None
+
+
+def _retirado(codigo, mensaje):
+    t = mensaje.lower()
+    return codigo == 404 or "no longer available" in t or "is not found" in t or "not supported for generatecontent" in t
 TIPOS_ACTOR = ["Gobierno / agencia bilateral", "Organismo multilateral", "Fundación / filantropía", "ONG / sociedad civil",
                "Academia / investigación", "Empresa privada"]
 _CARACTER = {"Gobierno / agencia bilateral": "Oficial", "Organismo multilateral": "Oficial"}
@@ -124,14 +160,34 @@ def llamar(prompt, clave, modelo, espera=120, buscar_en_google=True):
             cuerpo["tools"] = [{"google_search": {}}]
         else:
             cuerpo["generationConfig"]["responseMimeType"] = "application/json"
-        r = requests.post(URL_API.format(modelo=modelo), json=cuerpo, timeout=espera,
-                          headers={"x-goog-api-key": clave, "Content-Type": "application/json"})
-        if r.status_code != 200:
+        if SUSPENDIDO["motivo"]:
+            raise ErrorGemini(SUSPENDIDO["motivo"])
+        modelo = _REEMPLAZO.get(modelo, modelo)
+        for intento in range(2):
+            r = requests.post(URL_API.format(modelo=modelo), json=cuerpo, timeout=espera,
+                              headers={"x-goog-api-key": clave, "Content-Type": "application/json"})
+            if r.status_code == 200:
+                break
             try:
                 msg = r.json().get("error", {}).get("message", r.text[:300])
             except ValueError:
                 msg = r.text[:300]
-            raise ErrorGemini(f"Gemini respondió {r.status_code}: {msg}")
+            if intento == 0 and _retirado(r.status_code, msg):
+                nuevo = _modelo_sugerido(msg, clave)
+                if nuevo and nuevo != modelo:
+                    log.warning("El modelo %s ya no está disponible; se usa %s. Conviene poner %s en "
+                                "Parametros → Modelo de Gemini (o en el secreto GEMINI_MODEL).", modelo, nuevo, nuevo)
+                    _REEMPLAZO[modelo] = nuevo
+                    modelo = nuevo
+                    continue
+            error = f"Gemini respondió {r.status_code}: {msg}"
+            if r.status_code in (400, 403) and buscar_en_google and ("search" in msg.lower() or "grounding" in msg.lower()
+                                                                      or "billing" in msg.lower()):
+                error += (" — La búsqueda en Google de Gemini puede requerir facturación activa en este modelo. "
+                          "El completado de campos del mapeo no la necesita.")
+            if r.status_code in (401, 403) or _retirado(r.status_code, msg) or (r.status_code == 429 and "day" in msg.lower()):
+                SUSPENDIDO["motivo"] = error  # no tiene sentido repetirlo en esta corrida
+            raise ErrorGemini(error)
         datos = r.json()
     cand = (datos.get("candidates") or [{}])[0]
     texto = "".join(p.get("text", "") for p in cand.get("content", {}).get("parts", []))
@@ -217,7 +273,14 @@ def completar(fila, c, catalogos, cfg, texto_norm, modalidad, hoy=None):
     if c.get("descripcion"):
         fila["[Sistema] Descripción en la página"] = fila.get("Descripción", "")
         poner("Descripción", str(c["descripcion"]).strip())
-    poner("Objetivos General y Específicos", str(c.get("objetivos") or "").strip() if not fila.get("Objetivos General y Específicos") else "")
+    from calidad.entrada import en_espanol, criterios_con_contenido
+    obj = fila.get("Objetivos General y Específicos", "")
+    if not obj or not en_espanol(obj):
+        poner("Objetivos General y Específicos", str(c.get("objetivos") or "").strip())
+    obs_f = str(c.get("observaciones_fecha") or "").strip()
+    if obs_f and fila.get("¿La convocatoria es permanente?") != "Si":
+        fila["[Sistema] Observación de fecha en la página"] = fila.get("Observaciones a la fecha límite de aplicación", "")
+        poner("Observaciones a la fecha límite de aplicación", obs_f)
     if not fila.get("Fecha Límite de Aplicación"):
         f = str(c.get("fecha_limite") or "").strip()
         if f.lower().startswith("perman"):
@@ -236,7 +299,8 @@ def completar(fila, c, catalogos, cfg, texto_norm, modalidad, hoy=None):
             poner(CAMPO_APERTURA, f"{d.day}/{d.month}/{d.year}")
         except ValueError:
             pass
-    if not str(fila.get(CAMPO_REQUISITOS, "")).strip():
+    req_actual = str(fila.get(CAMPO_REQUISITOS, "")).strip()
+    if not req_actual or not en_espanol(req_actual, CAMPO_REQUISITOS) or criterios_con_contenido(req_actual) < 2:
         criterios = PLANT.get(modalidad.split(" (")[0], ["Requisitos de participación", "Procedimiento de postulación"])
         req = c.get("requisitos") or {}
         if isinstance(req, str):
@@ -250,13 +314,19 @@ def completar(fila, c, catalogos, cfg, texto_norm, modalidad, hoy=None):
     if not fila.get("Esta convocatoria prioriza alguna de las siguientes poblaciones?"):
         poner("Esta convocatoria prioriza alguna de las siguientes poblaciones?",
               _multi(_lista(c.get("poblaciones"), catalogos.get("Esta convocatoria prioriza alguna de las siguientes poblaciones?", []))))
-    if not fila.get("Áreas temáticas de interés"):
+    if not fila.get("Áreas temáticas de interés") or len([t for t in fila["Áreas temáticas de interés"].split(",") if t.strip()]) > 3:
         temas = _lista(c.get("tematicas"), catalogos.get("Áreas temáticas de interés", []), 3)
         if temas:
             poner("Áreas temáticas de interés", _multi(temas))
             for campo, valor in reglas.alineacion(temas, cfg, modalidad).items():
-                if campo in fila and not fila[campo]:
+                if not fila.get(campo):
                     fila[campo] = valor
+    # la alineación (ENCI, ODS, PND, CAD, sector) sale de las temáticas: se llena si quedó vacía
+    temas_actuales = [t.strip() for t in str(fila.get("Áreas temáticas de interés", "")).split(",") if t.strip()]
+    if temas_actuales:
+        for campo, valor in reglas.alineacion(temas_actuales, cfg, modalidad).items():
+            if not fila.get(campo):
+                fila[campo] = valor
     amb = _lista(c.get("ambito_geografico"), catalogos.get("Ámbito Geográfico", []), 1)
     if amb and amb[0] != fila.get("Ámbito Geográfico"):
         poner("Ámbito Geográfico", amb[0])
@@ -269,6 +339,8 @@ def completar(fila, c, catalogos, cfg, texto_norm, modalidad, hoy=None):
     if not fila.get("Financiación") and monto and moneda in ("", "USD"):
         poner("Financiación", f"${float(monto):.2f}")
     obs = str(c.get("observaciones_monto") or "").strip()
+    if not en_espanol(fila.get("Observaciones sobre el financiamiento", "")) and not obs:
+        fila["Observaciones sobre el financiamiento"] = ""  # mejor vacío que en otro idioma
     if obs or (monto and moneda and moneda != "USD"):
         poner("Observaciones sobre el financiamiento",
               "; ".join(x for x in (obs, f"Monto según Gemini: {monto} {moneda}" if monto and moneda != "USD" else "") if x))
@@ -370,6 +442,10 @@ def prompt_completar(texto, titulo, url, catalogos, modalidad):
     return f"""Eres analista de la Dirección de Gestión de Demanda de Cooperación Internacional de APC-Colombia.
 Lee SOLO el texto de esta página oficial de una convocatoria ({modalidad.split(" (")[0]}) y llena los campos del formulario.
 No busques ni inventes nada: si un dato no está en el texto, deja el campo vacío ("" o []).
+TODO lo que escribas va en ESPAÑOL, aunque la página esté en otro idioma: traduce con fidelidad, sin agregar nada.
+Si el texto termina con «Información general de la página», esa parte vale para todas las convocatorias de esa página:
+úsala solo para lo que la convocatoria no dice (por ejemplo, el calendario general); los datos propios de la convocatoria mandan.
+Esta información entra a un registro oficial: debe quedar completa, clara y lista para revisión.
 
 Página: {url}
 Título: {titulo}
@@ -379,10 +455,13 @@ Texto (entre <<< y >>>):
 Devuelve SOLO un objeto JSON con estos campos (los de lista deben usar exactamente los valores indicados):
 - "nombre": nombre en español y, entre paréntesis, el nombre original si está en otro idioma
 - "descripcion": 2 o 3 frases en español
-- "objetivos": objetivo general y específicos, en español
+- "objetivos": objetivo general y específicos, en español. Si la página no los enuncia como tales, redáctalos a partir de
+  lo que la página dice que busca o financia la convocatoria (sin inventar)
 - "fecha_limite": DD/MM/AAAA, o "Permanente", o ""
+- "observaciones_fecha": en español y en una frase: aclaraciones sobre la fecha límite (hora y zona horaria, si hay
+  varias rondas, si es por orden de llegada…), o "Ninguna"
 - "fecha_apertura": DD/MM/AAAA si la página la indica, o ""
-- "requisitos": objeto con estos criterios de la modalidad {modalidad.split(" (")[0]} (texto en español; "" si la página no lo dice):
+- "requisitos": objeto con estos criterios de la modalidad {modalidad.split(" (")[0]} (texto en español; "No se indica" si la página no lo dice):
     Subvención: {json.dumps(PLANT["Subvención"], ensure_ascii=False)}
     Beca: {json.dumps(PLANT["Beca"], ensure_ascii=False)}
     Premio: {json.dumps(PLANT["Premio"], ensure_ascii=False)}
@@ -417,7 +496,7 @@ def completar_mapeo(filas, cfg, catalogos, hoy, clave=None, modelo=None, maximo=
     import time
     from . import texto as tx
     clave = clave or os.environ.get("GEMINI_API_KEY", "")
-    if not str(cfg.p("Completar campos con Gemini en el mapeo", "Sí")).lower().startswith("s"):
+    if not str(cfg.p("Completar campos con Gemini en el mapeo", "Sí")).lower().startswith("s") or SUSPENDIDO["motivo"]:
         return 0
     if not clave and not os.environ.get("MAPEO_GEMINI_PRUEBA_COMPLETAR"):
         log.info("Sin clave de Gemini: las convocatorias quedan con los campos leídos en la página.")
@@ -436,10 +515,12 @@ def completar_mapeo(filas, cfg, catalogos, hoy, clave=None, modelo=None, maximo=
                                                catalogos, fila["Modalidad"]), clave, modelo, buscar_en_google=False)
             c = leer_objeto(texto)
         except (ErrorGemini, requests.RequestException) as e:
-            log.warning("Gemini no pudo completar «%s»: %s", fila["Nombre de la Convocatoria"][:60], e)
-            if "429" in str(e):  # límite del plan: no seguir insistiendo
-                log.warning("Se alcanzó el límite de Gemini: las demás quedan con los campos leídos en la página.")
+            if SUSPENDIDO["motivo"] or "429" in str(e):  # clave, modelo o límite: no seguir insistiendo
+                SUSPENDIDO["motivo"] = SUSPENDIDO["motivo"] or str(e)
+                log.warning("Gemini no se usará en lo que queda de esta corrida (%s). Las convocatorias quedan con los "
+                            "campos leídos en la página y se envían igual a la bandeja.", e)
                 break
+            log.warning("Gemini no pudo completar «%s»: %s", fila["Nombre de la Convocatoria"][:60], e)
             continue
         usados = completar(fila, c, catalogos, cfg, tx.normalizar(fila["_texto"]), fila["Modalidad"], hoy)
         fila["[Sistema] Propuesta de Gemini"] = (

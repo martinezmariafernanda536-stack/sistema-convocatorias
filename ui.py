@@ -15,6 +15,7 @@ ESTILOS = f"""<style>
  .ale {{background:#FFF4CC; border-radius:6px; padding:6px 10px; margin-bottom:4px; font-size:14px}}
  .ok  {{background:#DDF1EC; border-radius:6px; padding:6px 10px; margin-bottom:4px; font-size:14px}}
  .meta {{background:#F3F6FA; border-radius:6px; padding:8px 12px; font-size:13.5px; margin-bottom:8px}}
+ .paso {{font-weight:700; font-size:1.05rem; color:{NAVY}; margin:14px 0 6px; border-bottom:2px solid #e3e8ef; padding-bottom:4px}}
 </style>"""
 
 

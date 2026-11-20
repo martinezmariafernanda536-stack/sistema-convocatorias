@@ -67,6 +67,7 @@ class Fuente:
     modalidades: list = field(default_factory=lambda: list(MODALIDADES))
     grupo: str = ""
     actor: str = ""  # nombre exacto en el catálogo de actores (CICLOPE), si se conoce
+    estado_validacion: str = ""
 
 
 @dataclass
@@ -118,6 +119,7 @@ def cargar(ruta=RUTA_CONFIG):
             modalidades=modalidades_de(f.get("Modalidades a buscar")),
             grupo=str(f.get("Grupo") or f.get("Tipo de fuente") or "").strip(),
             actor=str(f.get("Actor en el catálogo") or "").strip(),
+            estado_validacion=str(f.get("Estado de validación") or "").strip(),
         ))
 
     palabras_modalidad = {}

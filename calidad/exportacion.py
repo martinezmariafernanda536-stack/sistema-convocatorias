@@ -8,7 +8,7 @@ from calidad import reglas as R
 
 RAIZ = Path(__file__).resolve().parents[1]
 HOJAS = [("Base", "Aprobada"), ("Por revisar", "Por revisar"), ("Actor pendiente", "Actor pendiente de crear"),
-         ("Descartadas", "Descartada")]
+         ("Por completar", "Por completar"), ("Descartadas", "Descartada")]
 
 
 def _columnas():
