@@ -227,6 +227,22 @@ de la página más el ancla de la sección (`…/becas#beca-al-talento-academico
 - Si el contenido de los desplegables solo aparece al hacer clic (se carga con JavaScript), la página tiene que leerse con
   navegador: marcar la fuente con «Requiere navegador» en la configuración (necesita Playwright en el servidor).
 
+## La búsqueda trae pocas, pero completas
+
+Cada búsqueda tiene dos pasos:
+
+1. **Recorrer los sitios** y reunir candidatas (lo que ya se conoce no se vuelve a abrir).
+2. **Elegir y completar:** se ordenan las candidatas (abiertas y con fecha próxima, elegibles y con página rica en información
+   primero) y se toman hasta **40** (parámetro «Máximo de convocatorias nuevas por búsqueda» o el control de la pantalla).
+   Gemini lee la página de cada una, la **traduce al español y llena el formulario**, y dice si de verdad es una convocatoria,
+   si Colombia puede postularse y si está abierta. Lo que no es convocatoria, no es elegible o ya cerró se descarta con el
+   motivo; lo completo pasa a la bandeja.
+
+Las candidatas que no alcanzaron el cupo **no se guardan ni se olvidan**: se vuelven a considerar en la siguiente búsqueda.
+Sin Gemini solo pasa lo que ya está en español y completo en su página. El botón **Probar Gemini** comprueba la clave y el
+modelo. Si quedó una lista grande «Por completar» de versiones anteriores, el administrador la puede **vaciar**: el sistema
+olvida esas convocatorias y las vuelve a encontrar con las reglas nuevas.
+
 ## Control de entrada: lo automático llega en español y completo
 
 Lo que encuentra el sistema solo (mapeo y búsqueda con Gemini) **solo pasa a la bandeja si llega en español y con los campos

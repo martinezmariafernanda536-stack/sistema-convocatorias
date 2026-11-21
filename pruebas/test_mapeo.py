@@ -86,7 +86,8 @@ def test_mapeo_completo(entorno, tmp_path):
     lid = por_nombre["Beca de liderazgo empresarial (ejemplo)"]
     assert lid["¿La convocatoria es permanente?"] == "Si"
 
-    assert any(n.startswith("Scholarship brochure") for n in por_nombre)   # PDF para revisar a mano
+    # un PDF no se puede completar solo: queda en el reporte para revisarlo a mano, no en la bandeja
+    assert any(n.startswith("Scholarship brochure") for n in desc["Nombre"])
     assert not any("aggregator" in n.lower() for n in por_nombre)          # agregadores no entran
     assert not any("news" in n.lower() for n in por_nombre)
 
@@ -96,19 +97,22 @@ def test_mapeo_completo(entorno, tmp_path):
     assert motivos["ICETEX Utrecht scholarship for Colombians"].startswith("Está en ICETEX")
     assert motivos["Summer school scholarship 2026"].startswith("Convocatoria vencida")
 
-    # Segunda corrida, modo rápido: no vuelve a abrir lo que ya conoce, y no lo da por retirado
+    # Sin Gemini, lo que está en inglés no se guarda: en la segunda corrida vuelve a quedar como candidata (para
+    # completarla cuando haya Gemini), sin duplicarse y sin darse por retirada
+    assert set(rev["[Sistema] Resultado"]) == {"Incompleta o en otro idioma: se completa en una búsqueda con Gemini"}
     ruta2 = correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY)
     rev2 = pd.read_excel(ruta2, sheet_name="Revisión", dtype=str)
-    assert len(rev2) == 0
+    assert set(rev2["Nombre de la Convocatoria"]) == set(rev["Nombre de la Convocatoria"])
     assert len(pd.read_excel(ruta2, sheet_name="Ya no aparecen", dtype=str)) == 0
-    # Revisión completa: vuelve a abrir todo y lo encuentra sin cambios
+    # Revisión completa: vuelve a abrir todo; lo que no se pudo guardar sigue disponible como nuevo
     ruta3 = correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY, "--completo")
     rev3 = pd.read_excel(ruta3, sheet_name="Revisión", dtype=str)
-    assert set(rev3["[Sistema] Estado"]) == {"Sin cambios"}
+    assert set(rev3["[Sistema] Estado"]) == {"Nueva"}
 
 
-def test_revision_completa_automatica_cada_30_dias(entorno):
+def test_revision_completa_automatica_cada_30_dias(entorno, monkeypatch):
     """El modo rápido se salta lo conocido, pero cada fuente tiene revisión completa cada 30 días."""
+    monkeypatch.setenv("MAPEO_GEMINI_PRUEBA_COMPLETAR", str(RAIZ / "pruebas" / "gemini_completar.json"))
     correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY)
     rapida = pd.read_excel(correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", "2026-11-20"),
                            sheet_name="Revisión", dtype=str)
@@ -154,14 +158,9 @@ def test_mapeo_envia_a_la_bandeja_sin_tocar_la_base(entorno, tmp_path):
     from bandeja.almacen import AlmacenSQLite
     correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY)
     a = AlmacenSQLite(tmp_path / "base.db")
-    # sin Gemini, lo que está en inglés no pasa a la bandeja: queda «Por completar», fuera de la vista de revisión
+    # sin Gemini, lo que está en inglés no pasa a la bandeja ni se acumula: espera a una búsqueda con Gemini
     assert not [i for i in a.items("Por revisar") if "Scholarships" in i["datos"]["Nombre de la Convocatoria"]]
-    items = a.items("Por completar")
-    nombres = {i["datos"]["Nombre de la Convocatoria"] for i in items}
-    assert "Utrecht Excellence Scholarships" in nombres
-    assert "Holland grant for EU students" not in nombres          # descartada automáticamente
-    assert all(i["meta"]["faltantes"] for i in items)              # dice qué le falta
-    assert all(i["datos"]["VERIFICACIÓN: Colombia hace parte de los países beneficiarios"] == "" for i in items)
+    assert a.items("Por completar") == []
     assert a.base() == []                                              # nada entra a la base sin revisión
     # una segunda corrida no duplica nada
     total = len(a.items())
@@ -169,19 +168,49 @@ def test_mapeo_envia_a_la_bandeja_sin_tocar_la_base(entorno, tmp_path):
     assert len(a.items()) == total
 
 
-def test_por_completar_pasa_a_la_bandeja_cuando_gemini_la_completa(entorno, tmp_path, monkeypatch):
-    """Lo que quedó en inglés se reintenta en la siguiente búsqueda; con Gemini queda en español y completo y pasa."""
+def test_con_gemini_llegan_traducidas_y_completas(entorno, tmp_path, monkeypatch):
+    """Con Gemini, la convocatoria en inglés se traduce y se completa antes de guardarla, y pasa a la bandeja."""
     from bandeja.almacen import AlmacenSQLite
+    monkeypatch.setenv("MAPEO_GEMINI_PRUEBA_COMPLETAR", str(RAIZ / "pruebas" / "gemini_completar.json"))
     correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY, "--grupo", "Universidades y centros de investigación")
     a = AlmacenSQLite(tmp_path / "base.db")
-    url_utrecht = lambda i: i["datos"]["Cómo aplicar"].endswith("utrecht-excellence-scholarships")  # noqa: E731
-    assert any(url_utrecht(i) for i in a.items("Por completar"))
-    monkeypatch.setenv("MAPEO_GEMINI_PRUEBA_COMPLETAR", str(RAIZ / "pruebas" / "gemini_completar.json"))
-    correr("completar-pendientes", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY)
-    item = next(i for i in a.items("Por revisar") if url_utrecht(i))
+    item = next(i for i in a.items("Por revisar") if i["datos"]["Cómo aplicar"].endswith("utrecht-excellence-scholarships"))
     assert item["datos"]["Nombre de la Convocatoria"] == "Becas de Excelencia de Utrecht (Utrecht Excellence Scholarships)"
     assert item["datos"]["Observaciones a la fecha límite de aplicación"].startswith("La fecha límite corresponde")
     assert "Perfil de los aspirantes: Estudiantes" in item["datos"]["Requisitos y condiciones de participación"]
+
+
+def test_cupo_de_nuevas_por_busqueda(entorno, tmp_path, monkeypatch):
+    """Se completan solo las N candidatas más prometedoras; las demás quedan para la próxima búsqueda (no se pierden)."""
+    from bandeja.almacen import AlmacenSQLite
+    monkeypatch.setenv("MAPEO_GEMINI_PRUEBA_COMPLETAR", str(RAIZ / "pruebas" / "gemini_completar.json"))
+    ruta = correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY, "--maximo-nuevas", "1")
+    rev = pd.read_excel(ruta, sheet_name="Revisión", dtype=str).fillna("")
+    resultados = list(rev["[Sistema] Resultado"])
+    assert resultados.count("Enviada a la bandeja") == 1
+    assert sum(r.startswith("Para la próxima búsqueda") for r in resultados) == len(resultados) - 1
+    a = AlmacenSQLite(tmp_path / "base.db")
+    assert len(a.items()) == 1
+    # en la siguiente búsqueda vuelven a estar disponibles
+    rev2 = pd.read_excel(correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY, "--maximo-nuevas", "1"),
+                         sheet_name="Revisión", dtype=str).fillna("")
+    assert len(rev2) == len(rev) - 1
+
+
+def test_gemini_descarta_lo_que_no_es_convocatoria(entorno, tmp_path, monkeypatch):
+    import json as _json
+    from bandeja.almacen import AlmacenSQLite
+    d = _json.load(open(RAIZ / "pruebas" / "gemini_completar.json"))
+    t = _json.loads(d["candidates"][0]["content"]["parts"][0]["text"])
+    t |= {"es_convocatoria": False, "motivo_descarte": "Es una noticia sobre becas pasadas"}
+    d["candidates"][0]["content"]["parts"][0]["text"] = _json.dumps(t, ensure_ascii=False)
+    falso = tmp_path / "g.json"
+    falso.write_text(_json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("MAPEO_GEMINI_PRUEBA_COMPLETAR", str(falso))
+    ruta = correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY)
+    desc = pd.read_excel(ruta, sheet_name="Descartadas automáticamente", dtype=str).fillna("")
+    assert any(m.startswith("No es una convocatoria: Es una noticia") for m in desc["Motivo"])
+    assert AlmacenSQLite(tmp_path / "base.db").items() == []
 
 
 def test_limpieza_de_la_bandeja(entorno, tmp_path):
@@ -365,7 +394,7 @@ def test_ejecucion_en_segundo_plano(entorno, tmp_path):
     tareas.actual().hilo.join(120)
     t = tareas.actual()
     assert t.estado == "Terminada", t.lineas[-5:]
-    assert A.items("Por revisar") or A.items("Por completar")  # llegó a la base compartida
+    assert any("candidatas" in l for l in t.lineas)  # recorrió las fuentes
     assert A.leer_archivo("ultimo_mapeo.xlsx") and A.leer_archivo("historial_mapeo.json")
     assert json.loads(A.leer_archivo("tarea_actual.json"))["estado"] == "Terminada"
     assert tareas.interrumpida(A) is None

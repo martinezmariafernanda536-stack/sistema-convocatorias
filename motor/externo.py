@@ -478,6 +478,16 @@ Devuelve SOLO un objeto JSON con estos campos (los de lista deben usar exactamen
 - "observaciones_monto": qué cubre el monto, en español
 - "email": correo de contacto que aparezca en el texto, o ""
 - "evidencia_colombia": frase textual que muestra quién puede postularse (Colombia, América Latina, extranjeros, todos los países…), o ""
+- "es_convocatoria": true si la página describe UNA convocatoria concreta a la que se puede postular (beca, subvención,
+  cooperación técnica o premio, con su propio proceso de postulación); false si es una noticia, un listado general, una
+  página institucional, un reglamento, un evento o una convocatoria de empleo
+- "colombia": "elegible" si nombra a Colombia o a América Latina, o si está abierta a todo el mundo, a extranjeros o a
+  estudiantes internacionales sin excluir a Colombia; "no elegible" si exige una nacionalidad o un país que no es Colombia
+  (por ejemplo «nacionalidad mexicana», «solo residentes de la Unión Europea») o excluye a Colombia o a la región;
+  "no se indica" si la página no lo dice
+- "estado": "abierta", "próxima" (anunciada, aún no abre), "cerrada" o "no se indica"
+- "motivo_descarte": si es_convocatoria es false, o colombia es "no elegible", o estado es "cerrada": una frase en español
+  que explique por qué; si no, ""
 """
 
 
@@ -522,6 +532,10 @@ def completar_mapeo(filas, cfg, catalogos, hoy, clave=None, modelo=None, maximo=
                 break
             log.warning("Gemini no pudo completar «%s»: %s", fila["Nombre de la Convocatoria"][:60], e)
             continue
+        fila["_veredicto"] = {"es_convocatoria": c.get("es_convocatoria", True) is not False,
+                              "colombia": str(c.get("colombia") or "no se indica").lower(),
+                              "estado": str(c.get("estado") or "no se indica").lower(),
+                              "motivo": str(c.get("motivo_descarte") or "").strip()}
         usados = completar(fila, c, catalogos, cfg, tx.normalizar(fila["_texto"]), fila["Modalidad"], hoy)
         fila["[Sistema] Propuesta de Gemini"] = (
             ("Campos completados por Gemini leyendo la página (confirmar): " + ", ".join(usados) + ". " if usados else "")
@@ -530,3 +544,28 @@ def completar_mapeo(filas, cfg, catalogos, hoy, clave=None, modelo=None, maximo=
         if pausa and i < len(pendientes) - 1 and not os.environ.get("MAPEO_GEMINI_PRUEBA_COMPLETAR"):
             time.sleep(pausa)
     return hechas
+
+
+def probar(clave=None, modelo=None, cfg=None):
+    """Consulta mínima para saber si Gemini responde. Devuelve (ok, modelo_usado, mensaje)."""
+    clave = clave or os.environ.get("GEMINI_API_KEY", "")
+    if not clave:
+        return False, "", "No hay clave de Gemini: agrega GEMINI_API_KEY en los secretos de Streamlit."
+    modelo = modelo or os.environ.get("GEMINI_MODEL") or (str(cfg.p("Modelo de Gemini", MODELO_POR_DEFECTO)) if cfg else MODELO_POR_DEFECTO)
+    reiniciar_corrida()
+    try:
+        texto, _ = llamar('Responde solo con este JSON: {"ok": true, "idioma": "español"}', clave, modelo, espera=60,
+                          buscar_en_google=False)
+        leer_objeto(texto)
+    except (ErrorGemini, requests.RequestException) as e:
+        reiniciar_corrida()
+        t = str(e)
+        claro = ("La clave de Gemini no es válida: revisa GEMINI_API_KEY en los secretos." if "API key not valid" in t or " 400" in t and "key" in t.lower() else
+                 "La clave no tiene permiso para usar este modelo." if " 403" in t else
+                 "Se alcanzó el límite de consultas de Gemini (por minuto o por día). Espera un rato o mañana." if " 429" in t else
+                 "El modelo no está disponible: pon GEMINI_MODEL = \"gemini-3.8-flash\" en los secretos." if " 404" in t else
+                 "No se pudo conectar con Gemini." if isinstance(e, requests.RequestException) else "Gemini no respondió bien.")
+        return False, _REEMPLAZO.get(modelo, modelo), f"{claro} Detalle: {t[:300]}"
+    usado = _REEMPLAZO.get(modelo, modelo)
+    nota = f" (el modelo configurado, {modelo}, ya no está disponible; se usó {usado})" if usado != modelo else ""
+    return True, usado, "Gemini responde correctamente" + nota + "."

@@ -227,6 +227,43 @@ def buscar_duplicado(d, otros, umbral_nombre=92):
     return ("edicion_anterior", anterior) if anterior else ("", None)
 
 
+class IndiceDuplicados:
+    """buscar_duplicado contra miles de convocatorias sin compararlas todas: solo con las que comparten enlace o alguna
+    palabra distintiva del nombre."""
+
+    def __init__(self, otros=()):
+        self.por_url, self.por_palabra, self.todos = {}, {}, []
+        for o in otros:
+            self.agregar(o)
+
+    @staticmethod
+    def _claves(nombre):
+        from analitica.datos import norm
+        palabras = set()
+        for v in variantes_nombre(nombre):
+            ws = sorted({w for w in re.findall(r"[a-z0-9]+", norm(v)) if len(w) > 3}, key=len, reverse=True)
+            palabras.update(ws[:3])
+        return palabras
+
+    def agregar(self, d):
+        i = len(self.todos)
+        self.todos.append(d)
+        u = _url(d.get("Cómo aplicar", ""))
+        if u.startswith("http"):
+            self.por_url.setdefault(u, []).append(i)
+        for w in self._claves(d.get("Nombre de la Convocatoria", "")):
+            self.por_palabra.setdefault(w, []).append(i)
+
+    def buscar(self, d, excluir=None):
+        idx = set(self.por_url.get(_url(d.get("Cómo aplicar", "")), []))
+        for w in self._claves(d.get("Nombre de la Convocatoria", "")):
+            lista = self.por_palabra.get(w, [])
+            if len(lista) < 400:  # una palabra que está en todas no sirve para acotar
+                idx.update(lista)
+        otros = [self.todos[i] for i in sorted(idx) if self.todos[i] is not excluir]
+        return buscar_duplicado(d, otros)
+
+
 def describir_periodo(d):
     p = periodo(d)
     return "permanente" if p[0] == "permanente" else str(p[1] or "sin fecha")

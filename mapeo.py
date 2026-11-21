@@ -305,16 +305,23 @@ def mapear(cfg, args):
                  "(cada %d días).", n_rapidas, len(fuentes) - n_rapidas, cada)
     from calidad.reglas import CATALOGOS
     from motor import externo
-    cupo_gemini = 0 if getattr(args, "sin_gemini", False) else int(cfg.p("Máximo de convocatorias a completar con Gemini por corrida", 80) or 0)
+    usar_gemini = (not getattr(args, "sin_gemini", False)
+                   and str(cfg.p("Completar campos con Gemini en el mapeo", "Sí")).lower().startswith("s")
+                   and bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("MAPEO_GEMINI_PRUEBA_COMPLETAR")))
+    maximo_nuevas = int(getattr(args, "maximo_nuevas", None) or cfg.p("Máximo de convocatorias nuevas por búsqueda", 40) or 40)
     externo.reiniciar_corrida()
     CONTEO.update(bandeja=0, por_completar=0, duplicadas=0)
-    if not getattr(args, "sin_bandeja", False):
-        # primero, lo que quedó pendiente de corridas anteriores (y se limpia la bandeja de duplicados e incompletas)
-        _, _, usadas = completar_pendientes(cfg, args, hoy, maximo=cupo_gemini)
-        cupo_gemini = max(0, cupo_gemini - usadas)
-    if getattr(args, "sin_gemini", False):
-        log.info("Sin Gemini en esta corrida: los campos se llenan solo con lo que se lee en cada página.")
-    filas, descartadas, resumen, leidas, vistas = [], [], [], set(), set()
+    if not getattr(args, "sin_bandeja", False) and usar_gemini:
+        # primero, unas pocas de las que quedaron pendientes (y se limpia la bandeja de duplicados e incompletas)
+        completar_pendientes(cfg, args, hoy, maximo=max(5, maximo_nuevas // 4))
+    elif not getattr(args, "sin_bandeja", False):
+        limpiar_bandeja(_almacen(), hoy)
+    if not usar_gemini:
+        log.info("Sin Gemini en esta corrida: solo pasan las convocatorias que ya están en español y completas en su página; "
+                 "las demás se vuelven a considerar en la próxima búsqueda con Gemini.")
+
+    # 1. recorrer las fuentes y reunir candidatas (todavía no se guarda nada en la bandeja)
+    filas, descartadas, resumen, leidas, vistas, pool = [], [], [], set(), set(), []
     enviadas_total = hechas = 0
     for fuente, res in en_paralelo(cfg, args, fuentes, lambda f: revisar_fuente(f, cfg, args, icetex, duplicados,
                                                                                    conocidas, completa[f.id])):
@@ -324,47 +331,103 @@ def mapear(cfg, args):
         if res["completa"] and res["leida"]:
             historial.marcar_completa(fuente.id, hoy.isoformat())
         revision = desc = 0
-        por_modalidad, nuevas = {}, []
         if res["leida"]:
             leidas.add(fuente.id)
         for tipo, url, fila, motivo in res["hallazgos"]:
             if url in vistas:  # la misma convocatoria publicada en dos fuentes
                 continue
             vistas.add(url)
-            fila["[Sistema] Estado"] = historial.registrar(url, fuente.id, fila, hoy.isoformat())
             enlace = fila.pop("_enlace", url)
-            if enlace != url:  # el enlace de la lista redirige: se recuerdan los dos
-                historial.marcar_visto(enlace, fuente.id, hoy.isoformat())
-            if tipo == "descartada":
+            if tipo == "descartada":  # descartada por las reglas: no hace falta volver a abrirla
+                historial.registrar(url, fuente.id, fila, hoy.isoformat())
+                if enlace != url:
+                    historial.marcar_visto(enlace, fuente.id, hoy.isoformat())
                 descartadas.append((motivo, fila["Nombre de la Convocatoria"], url, fuente.id))
                 desc += 1
-            else:
-                nuevas.append(fila)
-                revision += 1
-                m = fila["Modalidad"].split(" (")[0]
-                por_modalidad[m] = por_modalidad.get(m, 0) + 1
-        # se completa y se envía a la bandeja fuente por fuente: si la ejecución se interrumpe, nada de esto se pierde
-        if nuevas and cupo_gemini > 0:
-            n = externo.completar_mapeo(nuevas, cfg, CATALOGOS, hoy, maximo=cupo_gemini)
-            cupo_gemini -= n
-        a_bandeja = 0
-        if nuevas and not getattr(args, "sin_bandeja", False):
-            antes = CONTEO["por_completar"]
-            a_bandeja = enviar_a_bandeja(cfg, nuevas)
-            enviadas_total += a_bandeja
-            por_completar_fuente = CONTEO["por_completar"] - antes
-        else:
-            por_completar_fuente = 0
-        for f in nuevas:
-            f.pop("_texto", None)
-        filas.extend(nuevas)
+                continue
+            estado = historial.estado(url, fila)
+            if estado == "Sin cambios":
+                historial.registrar(url, fuente.id, fila, hoy.isoformat())
+                continue
+            fila["[Sistema] Estado"] = estado
+            fila["_url"], fila["_enlace"], fila["_fuente"] = url, enlace, fuente.id
+            fila["[Sistema] Resultado"] = "Para la próxima búsqueda (no alcanzó el cupo de esta)"
+            pool.append(fila)
+            revision += 1
         historial.guardar()
         _avisar("historial", historial.ruta)
-        nota = res["nota"] + (" | " + ", ".join(f"{k}: {v}" for k, v in por_modalidad.items()) if por_modalidad else "")
-        resumen.append((fuente.id, fuente.nombre, fuente.tipo, len(res["paginas"]), res["analizadas"], revision, desc, nota))
-        log.info("%-10s páginas %d · abiertas %d · ya conocidas %d · encontradas %d · a la bandeja %d · por completar %d · "
-                 "descartadas %d   [%d de %d]", fuente.id, len(res["paginas"]), res["analizadas"], len(res["sin_cambios"]),
-                 revision, a_bandeja, por_completar_fuente, desc, hechas, len(fuentes))
+        resumen.append((fuente.id, fuente.nombre, fuente.tipo, len(res["paginas"]), res["analizadas"], revision, desc, res["nota"]))
+        log.info("%-10s páginas %d · abiertas %d · ya conocidas %d · candidatas %d · descartadas %d   [%d de %d]", fuente.id,
+                 len(res["paginas"]), res["analizadas"], len(res["sin_cambios"]), revision, desc, hechas, len(fuentes))
+
+    # 2. elegir las mejores candidatas: no hace falta traer cientos; mejor pocas y completas
+    elegidas = sorted(pool, key=lambda f: prioridad(f, hoy), reverse=True)
+    if getattr(args, "sin_bandeja", False):
+        elegidas = elegidas  # en modo de prueba sin bandeja se reportan todas
+    else:
+        elegidas = elegidas[:maximo_nuevas]
+    if len(pool) > len(elegidas):
+        log.info("Se encontraron %d candidatas; en esta búsqueda se completan las %d más prometedoras (abiertas, con fecha y "
+                 "elegibles primero). Las demás se consideran en la próxima.", len(pool), len(elegidas))
+
+    # 3. completar (traducir con Gemini) y guardar solo lo que quede completo
+    for k, fila in enumerate(elegidas, 1):
+        if DETENER.is_set():
+            log.warning("Detenido: lo completado hasta aquí ya quedó guardado.")
+            break
+        if usar_gemini and externo.SUSPENDIDO["motivo"]:
+            log.warning("Gemini dejó de responder (%s): las %d candidatas restantes se consideran en la próxima búsqueda.",
+                        externo.SUSPENDIDO["motivo"][:200], len(elegidas) - k + 1)
+            break
+        url, fuente_id = fila["_url"], fila["_fuente"]
+        if not str(fila.get("_texto", "")).strip():  # un PDF u otra página sin texto legible: no se puede completar sola
+            historial.registrar(url, fuente_id, fila, hoy.isoformat())
+            fila["[Sistema] Resultado"] = "Descartada al leerla"
+            descartadas.append(("Documento sin texto legible (por ejemplo, un PDF): revisarlo a mano si interesa",
+                                fila["Nombre de la Convocatoria"], url, fuente_id))
+            continue
+        intento_gemini = False
+        if usar_gemini:
+            intento_gemini = externo.completar_mapeo([fila], cfg, CATALOGOS, hoy, maximo=1) > 0
+            if not intento_gemini and externo.SUSPENDIDO["motivo"]:
+                fila["[Sistema] Resultado"] = "Para la próxima búsqueda (Gemini no respondió)"
+                continue  # se avisa arriba en la siguiente vuelta
+            v = fila.get("_veredicto") or {}
+            motivo = ("No es una convocatoria: " if not v.get("es_convocatoria", True) else
+                      "No elegible para Colombia: " if v.get("colombia") == "no elegible" else
+                      "Convocatoria cerrada: " if v.get("estado") == "cerrada" else "")
+            if motivo:
+                historial.registrar(url, fuente_id, fila, hoy.isoformat())
+                fila["[Sistema] Resultado"] = "Descartada al leerla"
+                descartadas.append((motivo + (v.get("motivo") or "según la lectura de Gemini"), fila["Nombre de la Convocatoria"],
+                                    url, fuente_id))
+                log.info("  Descartada al leerla: %s · %s", fila["Nombre de la Convocatoria"][:60], motivo + v.get("motivo", "")[:120])
+                continue
+        if not getattr(args, "sin_bandeja", False):
+            # sin Gemini, lo incompleto no se guarda: se vuelve a considerar cuando Gemini pueda completarlo
+            guardada = enviar_a_bandeja(cfg, [fila], guardar_incompletas=intento_gemini)
+            if not guardada["guardada"]:
+                if guardada["motivo"] == "duplicada":
+                    historial.registrar(url, fuente_id, fila, hoy.isoformat())
+                    fila["[Sistema] Resultado"] = "Ya registrada este año"
+                else:
+                    fila["[Sistema] Resultado"] = "Incompleta o en otro idioma: se completa en una búsqueda con Gemini"
+                continue
+            enviadas_total += guardada["a_bandeja"]
+            fila["[Sistema] Resultado"] = "Enviada a la bandeja" if guardada["a_bandeja"] else "Por completar"
+        else:
+            fila["[Sistema] Resultado"] = "Encontrada (prueba sin bandeja)"
+        historial.registrar(url, fuente_id, fila, hoy.isoformat())
+        if fila["_enlace"] != url:
+            historial.marcar_visto(fila["_enlace"], fuente_id, hoy.isoformat())
+        historial.guardar()
+        _avisar("historial", historial.ruta)
+        log.info("  Completando {%d de %d} · resultado: a la bandeja %d · por completar %d", k, len(elegidas),
+                 CONTEO["bandeja"], CONTEO["por_completar"])
+    filas = [f for f in pool if f["[Sistema] Resultado"] != "Descartada al leerla"]  # el reporte muestra todo lo encontrado
+    for f in pool:
+        for c in ("_texto", "_url", "_enlace", "_fuente", "_veredicto"):
+            f.pop(c, None)
 
     retiradas = historial.retiradas(leidas)
     carpeta = RAIZ / "salidas"
@@ -380,15 +443,15 @@ def mapear(cfg, args):
     return ruta
 
 
-def enviar_a_bandeja(cfg, filas, origen="Mapeo automático"):
-    """Las convocatorias mapeadas nunca van directo a la base: entran a la bandeja para revisión humana."""
+def enviar_a_bandeja(cfg, filas, origen="Mapeo automático", guardar_incompletas=True):
+    """Las convocatorias mapeadas nunca van directo a la base: entran a la bandeja para revisión humana.
+    Devuelve {"guardada", "a_bandeja", "motivo"}."""
     from bandeja import flujo
     almacen = _almacen()
-    ya = [i["datos"] for i in almacen.items()]  # incluye descartadas: lo descartado este año no vuelve a llegar
-    enviadas = 0
+    from calidad.reglas import IndiceDuplicados
+    ya = IndiceDuplicados(i["datos"] for i in almacen.items())  # incluye descartadas: lo descartado este año no vuelve
     with almacen.lote(f"{origen}: {len(filas)} convocatorias"):
-        enviadas = _enviar(cfg, filas, origen, almacen, ya, flujo)
-    return enviadas
+        return _enviar(cfg, filas, origen, almacen, ya, flujo, guardar_incompletas)
 
 
 def _meta(fila):
@@ -416,19 +479,41 @@ def _datos_de(cfg, fila):
 CONTEO = {"bandeja": 0, "por_completar": 0, "duplicadas": 0}
 
 
-def _enviar(cfg, filas, origen, almacen, ya, flujo):
-    """Solo pasa a la bandeja lo que llega en español y completo; lo demás queda «Por completar» (fuera de la bandeja).
-    Lo que ya está en el sistema para el mismo año, con el mismo enlace o casi el mismo nombre, no entra."""
+def prioridad(fila, hoy):
+    """Qué candidatas completar primero: abiertas con fecha próxima, elegibles y con página rica en información."""
+    from calidad.reglas import fecha as a_fecha
+    p = 0.0
+    elig = str(fila.get("[Sistema] Elegibilidad Colombia", ""))
+    p += {"Elegible": 3, "Probable": 1.5}.get(elig, 0)
+    cierre = a_fecha(fila.get("Fecha Límite de Aplicación", ""))
+    if cierre and cierre >= hoy:
+        dias = (cierre - hoy).days
+        p += 3 + (1 if 7 <= dias <= 120 else 0)
+    elif str(fila.get("¿La convocatoria es permanente?", "")).lower().startswith("s"):
+        p += 1.5
+    largo = len(str(fila.get("_texto", "")))
+    p += 1 if largo > 1500 else (-2 if largo < 400 else 0)
+    if "título" in str(fila.get("[Sistema] Motivo modalidad", "")).lower():
+        p += 0.5
+    if str(fila.get("_url", "")).lower().endswith(".pdf"):
+        p -= 1
+    return p
+
+
+def _enviar(cfg, filas, origen, almacen, ya, flujo, guardar_incompletas=True):
+    """Solo pasa a la bandeja lo que llega en español y completo; lo demás queda «Por completar» (fuera de la bandeja),
+    o no se guarda si guardar_incompletas es False. Lo que ya está en el sistema para el mismo año no entra."""
     from calidad import entrada
     from calidad.reglas import buscar_duplicado
     catalogo, base = almacen.catalogo(), almacen.base()
-    enviadas = 0
+    res = {"guardada": False, "a_bandeja": 0, "motivo": ""}
     for fila in filas:
-        if fila["[Sistema] Estado"] == "Sin cambios":
+        if fila.get("[Sistema] Estado") == "Sin cambios":
             continue
-        tipo, otro = buscar_duplicado(fila, ya)
+        tipo, otro = ya.buscar(fila) if hasattr(ya, "buscar") else buscar_duplicado(fila, ya)
         if tipo in ("mismo_año", "nombre_mismo_año"):
             CONTEO["duplicadas"] += 1
+            res["motivo"] = "duplicada"
             log.info("  Ya registrada este año (no entra): %s = %s", fila["Nombre de la Convocatoria"][:60],
                      (otro or {}).get("Nombre de la Convocatoria", "")[:60])
             continue
@@ -436,18 +521,22 @@ def _enviar(cfg, filas, origen, almacen, ya, flujo):
         meta = _meta(fila)
         norm, hallazgos = flujo.evaluar(almacen, datos, catalogo=catalogo, base=base)
         faltan = entrada.faltantes(norm, hallazgos)
-        if faltan:
-            meta |= {"faltantes": faltan, "intentos": 1, "texto_pagina": str(fila.get("_texto", ""))[:12000]}
+        if faltan and not guardar_incompletas:
+            res["motivo"] = "incompleta"
+            continue
+        if faltan:  # el texto de la página no se guarda (haría pesada la base); al reintentar se vuelve a leer
+            meta |= {"faltantes": faltan, "intentos": 1}
             CONTEO["por_completar"] += 1
             log.info("  Por completar (no pasa a la bandeja): %s · falta: %s", fila["Nombre de la Convocatoria"][:60],
                      "; ".join(faltan)[:200])
-        flujo.ingresar(almacen, datos, f"{origen} · {fila['[Sistema] Fuente ID']}", origen, meta,
+        flujo.ingresar(almacen, datos, f"{origen} · {fila.get('[Sistema] Fuente ID', '')}", origen, meta,
                        estado=entrada.ESTADO if faltan else "Por revisar", catalogo=catalogo, base=base)
-        ya.append(datos)
+        ya.agregar(datos) if hasattr(ya, "agregar") else ya.append(datos)
+        res["guardada"] = True
         if not faltan:
-            enviadas += 1
+            res["a_bandeja"] += 1
             CONTEO["bandeja"] += 1
-    return enviadas
+    return res
 
 
 def _texto_de_la_pagina(lector, url):
@@ -459,23 +548,34 @@ def _texto_de_la_pagina(lector, url):
 
 def limpiar_bandeja(almacen, hoy=None):
     """Lo que llegó solo y nadie ha tocado: se descarta si es un duplicado del mismo año y vuelve a «Por completar»
-    si no está en español o le faltan datos. Lo que una persona ya editó no se mueve."""
+    si no está en español o le faltan datos. Lo que una persona ya editó no se mueve. Cada convocatoria se revisa
+    una sola vez (queda marcada), y los duplicados se buscan con un índice: sirve igual con miles."""
     from bandeja import flujo
     from calidad import entrada
-    from calidad.reglas import buscar_duplicado
-    catalogo, base = almacen.catalogo(), almacen.base()
+    from calidad.reglas import IndiceDuplicados
     todos = sorted(almacen.items(), key=lambda i: i["ingreso"])
+    por_revisar = [i for i in todos if i["estado"] in ("Por revisar", entrada.ESTADO) and flujo.es_automatica(i)
+                   and not flujo.tocada_por_persona(i) and not i["meta"].get("limpieza")]
+    if not por_revisar:
+        return 0, 0
+    log.info("Revisando %d convocatorias automáticas de la bandeja (duplicados e incompletas)…", len(por_revisar))
+    catalogo, base = almacen.catalogo(), almacen.base()
+    indice = IndiceDuplicados()
+    posicion, orden = {}, {}
+    for n, item in enumerate(todos):
+        indice.agregar(item["datos"])
+        posicion[item["id"]] = n
+        orden[id(item["datos"])] = n
     duplicadas = devueltas = 0
     with almacen.lote("Limpieza de la bandeja"):
-        for n, item in enumerate(todos):
-            if item["estado"] not in ("Por revisar", entrada.ESTADO) or not flujo.es_automatica(item) or flujo.tocada_por_persona(item):
-                continue
-            anteriores = [o["datos"] for o in todos[:n]]  # incluye descartadas: lo descartado este año no vuelve
-            tipo, otro = buscar_duplicado(item["datos"], anteriores)
-            if tipo in ("mismo_año", "nombre_mismo_año"):
+        for item in por_revisar:
+            n = posicion[item["id"]]
+            tipo, otro = indice.buscar(item["datos"], excluir=item["datos"])
+            anterior = otro is not None and orden.get(id(otro), n + 1) < n
+            cambio = False
+            if tipo in ("mismo_año", "nombre_mismo_año") and anterior:
                 flujo.descartar(almacen, item, "Sistema", "Duplicado: ya estaba registrada este año como «"
                                 + (otro or {}).get("Nombre de la Convocatoria", "")[:90] + "»")
-                item["estado"] = "Descartada"
                 duplicadas += 1
                 continue
             if item["estado"] == "Por revisar":
@@ -485,10 +585,13 @@ def limpiar_bandeja(almacen, hoy=None):
                     item["estado"] = entrada.ESTADO
                     item["meta"] |= {"faltantes": faltan, "intentos": 0}
                     flujo._evento(item, "Sistema", "Ingreso", "Devuelta a «Por completar»: " + "; ".join(faltan)[:300])
-                    almacen.guardar_item(item)
                     devueltas += 1
-    if duplicadas or devueltas:
-        log.info("Limpieza: %d duplicadas descartadas y %d incompletas o en otro idioma sacadas de la bandeja.", duplicadas, devueltas)
+                    cambio = True
+            if item["meta"].pop("texto_pagina", None) is not None:
+                cambio = True
+            item["meta"]["limpieza"] = True
+            almacen.guardar_item(item)
+    log.info("Limpieza: %d duplicadas descartadas y %d incompletas o en otro idioma sacadas de la bandeja.", duplicadas, devueltas)
     return duplicadas, devueltas
 
 
@@ -513,6 +616,8 @@ def completar_pendientes(cfg, args, hoy=None, maximo=None):
     log.info("Completando %d convocatorias que estaban «Por completar»…", len(pendientes))
     lector = None
     catalogo, base = almacen.catalogo(), almacen.base()
+    from calidad.reglas import IndiceDuplicados
+    indice = IndiceDuplicados(i["datos"] for i in almacen.items())
     pasaron = 0
     for item in pendientes:
         if DETENER.is_set() or externo.SUSPENDIDO["motivo"]:
@@ -526,8 +631,7 @@ def completar_pendientes(cfg, args, hoy=None, maximo=None):
         if fila["_texto"]:
             externo.completar_mapeo([fila], cfg, CATALOGOS, hoy, maximo=1)
         datos = {k: fila[k] for k in fila if not k.startswith(("_", "[Sistema]"))}
-        otros = [o["datos"] for o in almacen.items() if o["id"] != item["id"]]
-        tipo, otro = buscar_duplicado(datos, otros)
+        tipo, otro = indice.buscar(datos, excluir=item["datos"])
         if tipo in ("mismo_año", "nombre_mismo_año"):  # ya traducida, resultó ser una que ya estaba
             flujo.descartar(almacen, item, "Sistema", "Duplicado: ya estaba registrada este año como «"
                             + (otro or {}).get("Nombre de la Convocatoria", "")[:90] + "»")
@@ -536,7 +640,7 @@ def completar_pendientes(cfg, args, hoy=None, maximo=None):
         faltan = entrada.faltantes(norm, hallazgos)
         item["datos"] = norm
         item["meta"]["intentos"] = item["meta"].get("intentos", 0) + 1
-        item["meta"]["texto_pagina"] = fila["_texto"]
+        item["meta"].pop("texto_pagina", None)
         if fila.get("[Sistema] Propuesta de Gemini"):
             item["meta"]["gemini"] = fila["[Sistema] Propuesta de Gemini"]
         if faltan:
@@ -591,7 +695,7 @@ def buscar_externo(cfg, args):
     for motivo, nombre, url, _ in descartadas:
         log.info("  Descartada: %s · %s", nombre[:70], motivo)
     if not getattr(args, "sin_bandeja", False):
-        n = enviar_a_bandeja(cfg, filas, origen="Búsqueda externa (Gemini)")
+        n = enviar_a_bandeja(cfg, filas, origen="Búsqueda externa (Gemini)")["a_bandeja"]
         log.info("%d convocatorias enviadas a la bandeja de revisión.", n)
     return ruta
 
@@ -778,6 +882,7 @@ def main(argv=None):
     p.add_argument("--sin-bandeja", action="store_true", help="Mapear sin enviar a la bandeja (solo Excel)")
     p.add_argument("--reemplazar", action="store_true", help="migrar: borrar la base propia y volver a cargarla")
     p.add_argument("--todo-a-revision", action="store_true", help="importar: enviar todas las nuevas a la bandeja")
+    p.add_argument("--maximo-nuevas", type=int, help="mapear: cuántas convocatorias nuevas completar en esta búsqueda")
     p.add_argument("--sin-gemini", action="store_true", help="mapear: no completar campos con Gemini en esta corrida")
     p.add_argument("--completo", action="store_true", help="mapear: revisión completa (vuelve a abrir también las convocatorias ya conocidas)")
     p.add_argument("--reintentar-todas", action="store_true", help="completar-pendientes: también las que ya agotaron los intentos")

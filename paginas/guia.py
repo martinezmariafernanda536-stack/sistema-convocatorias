@@ -35,8 +35,9 @@ with st.expander("🔎 Buscar convocatorias nuevas", expanded=True):
 1. En el menú, abre **Buscar convocatorias**.
 2. Pulsa **Buscar convocatorias nuevas**. No hace falta cambiar ninguna opción.
 3. La búsqueda corre en el servidor: puedes cerrar la pestaña o seguir trabajando. La barra muestra cuántas fuentes lleva.
-4. Lo que encuentra **en español y completo** va llegando a **Revisar convocatorias**. Lo que esté en otro idioma o
-   incompleto queda **Por completar** (fuera de la bandeja) y el sistema lo reintenta en la siguiente búsqueda.
+4. La búsqueda tiene dos pasos: primero recorre los sitios y reúne candidatas; luego elige las más prometedoras (hasta
+   40 por búsqueda, se puede cambiar) y Gemini las **traduce al español y las completa** leyendo su página. Solo llega a
+   **Revisar convocatorias** lo que quede completo. Las demás candidatas se consideran en la siguiente búsqueda.
 5. Lo que ya está registrado este año (aunque tenga otro enlace o el nombre traducido) no vuelve a entrar.
 
 **Cada cuánto:** una vez por semana es suficiente. La primera vez tarda más, porque todavía no conoce ninguna convocatoria;
@@ -88,9 +89,8 @@ with st.expander("📊 Sacar un informe o el Excel de la base"):
 
 st.markdown("### Qué significa cada cosa")
 glosario = {
-    "Por completar": "Convocatorias que la búsqueda encontró pero que todavía no están en español o les faltan datos "
-                     "obligatorios. No llegan a la bandeja: el sistema las reintenta sola con Gemini en cada búsqueda. Se ven en "
-                     "Buscar convocatorias.",
+    "Por completar": "Convocatorias que Gemini ya leyó pero cuya página no trae todos los datos obligatorios. No llegan "
+                     "a la bandeja; el sistema reintenta unas pocas en cada búsqueda. Se ven en Buscar convocatorias.",
     "Bandeja / Por revisar": "Convocatorias que llegaron (de la búsqueda o registradas a mano) y todavía nadie ha aprobado.",
     "Base de convocatorias": "Las convocatorias ya revisadas y aprobadas. Es la información oficial para informes.",
     "Semáforo de cierre": "🔴 cierra en menos de 15 días · 🟠 en 37 días o menos · 🟢 con más plazo · ⚪ permanente · ⚫ sin fecha.",

@@ -36,6 +36,18 @@ class Historial:
                                                          "Observaciones sobre el financiamiento", "[Sistema] Elegibilidad Colombia"))
         return hashlib.sha1(clave.encode("utf-8")).hexdigest()[:16]
 
+    def estado(self, url, fila):
+        """Como registrar, pero sin anotar nada: 'Nueva', 'Actualizada' o 'Sin cambios'."""
+        previo = self.datos.get(url)
+        if previo is None:
+            return "Nueva"
+        return "Sin cambios" if previo.get("huella") == self.huella(fila) else "Actualizada"
+
+    def olvidar(self, urls):
+        """Para que el mapeo vuelva a encontrarlas como nuevas."""
+        for u in urls:
+            self.datos.pop(u, None)
+
     def registrar(self, url, fuente_id, fila, hoy):
         """Devuelve 'Nueva', 'Actualizada' o 'Sin cambios'."""
         self.vistas_hoy.add(url)

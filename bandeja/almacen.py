@@ -319,6 +319,16 @@ class AlmacenSQLite:
             con.executemany("INSERT OR REPLACE INTO convocatorias VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", [self._fila(i) for i in items])
         self._escribir(op, mensaje)
 
+    def borrar_items(self, ids, mensaje="Limpieza de convocatorias"):
+        ids = list(ids)
+
+        def op(con):
+            con.executemany("DELETE FROM convocatorias WHERE id=?", [(i,) for i in ids])
+            con.commit()
+            con.execute("VACUUM")  # el archivo vuelve a su tamaño: los guardados siguientes son más rápidos
+        if ids:
+            self._escribir(op, mensaje)
+
     # -- base publicada ----------------------------------------------------------
     def base(self):
         return [i["datos"] | {"_id": i["id"]} for i in self.items("Aprobada")]

@@ -43,17 +43,23 @@ _ENVIADAS = re.compile(r"a la bandeja (\d+)")
 _POR_COMPLETAR = re.compile(r"por completar (\d+)")
 
 
+_COMPLETANDO = re.compile(r"\{(\d+) de (\d+)\}")
+
+
 def progreso(lineas):
-    """(hechas, total, enviadas a la bandeja, por completar) a partir del registro de la ejecución."""
-    hechas = total = enviadas = pendientes = 0
+    """(hechas, total, enviadas a la bandeja, por completar, completadas, por completar en esta búsqueda)."""
+    hechas = total = enviadas = pendientes = k = n = 0
     for l in lineas:
         if m := _AVANCE.search(l):
             hechas, total = int(m.group(1)), int(m.group(2))
+        if m := _COMPLETANDO.search(l):
+            k, n = int(m.group(1)), int(m.group(2))
+        if "resultado:" in l:
             if m := _ENVIADAS.search(l):
-                enviadas += int(m.group(1))
+                enviadas = int(m.group(1))
             if m := _POR_COMPLETAR.search(l):
-                pendientes += int(m.group(1))
-    return hechas, total, enviadas, pendientes
+                pendientes = int(m.group(1))
+    return hechas, total, enviadas, pendientes, k, n
 
 
 @st.fragment(run_every=5)
@@ -69,10 +75,12 @@ def panel_ejecucion():
             c1.markdown(f"**⏳ {t.etiqueta}** · lleva {t.minutos()} min · la inició {t.usuario}")
             if c2.button("Detener", key="detener", width="stretch", icon=":material/stop:"):
                 tareas.detener()
-            hechas, total, enviadas, pend = progreso(t.lineas)
-            if total:
-                st.progress(hechas / total, text=f"{hechas} de {total} fuentes revisadas"
-                            + (f" · {enviadas} completas enviadas a revisión · {pend} por completar" if t.comando == "mapear" else ""))
+            hechas, total, enviadas, pend, k, n = progreso(t.lineas)
+            if n:
+                st.progress(k / n, text=f"Fuentes revisadas. Traduciendo y completando con Gemini: {k} de {n} · "
+                                        f"{enviadas} completas enviadas a revisión")
+            elif total:
+                st.progress(hechas / total, text=f"Paso 1 de 2 · {hechas} de {total} fuentes revisadas")
             else:
                 st.progress(0.0, text="Preparando…")
             st.caption("Puedes cerrar esta pestaña o seguir trabajando: la búsqueda sigue en el servidor y lo encontrado "
@@ -81,12 +89,16 @@ def panel_ejecucion():
                 st.code("\n".join(t.lineas[-25:]) or "Empezando…", language=None)
     elif t is not None and t.fin and time.time() - t.fin < 1800:
         icono = {"Terminada": "✅", "Detenida": "⏹️", "Error": "⚠️"}.get(t.estado, "")
-        hechas, total, enviadas, pend = progreso(t.lineas)
+        hechas, total, enviadas, pend, k, n = progreso(t.lineas)
         with st.container(border=True):
             st.markdown(f"**{icono} {t.etiqueta}: {t.estado.lower()}** en {t.minutos()} min"
                         + (f" · {hechas} de {total} fuentes revisadas" if total else "")
-                        + (f" · **{enviadas} completas** enviadas a revisión · {pend} quedaron por completar"
-                           if t.comando == "mapear" else "") + ".")
+                        + (f" · **{enviadas} completas y en español** enviadas a revisión" if t.comando == "mapear" else "")
+                        + (f" · {pend} quedaron por completar" if pend else "") + ".")
+            if t.comando == "mapear" and t.estado == "Terminada" and not enviadas:
+                st.caption("No llegó nada nuevo a la bandeja. Puede ser que no haya convocatorias nuevas, que todo lo encontrado "
+                           "ya estuviera registrado, o que Gemini no haya respondido (usa **Probar Gemini**). El detalle "
+                           "técnico lo dice.")
             if t.estado == "Error":
                 st.error("La búsqueda se detuvo por un error. Esto es lo que pasó:")
                 st.code("\n".join(t.lineas[-8:]) or "(sin mensajes)", language=None)
@@ -146,6 +158,11 @@ for c in ("Grupo", "Verificación del dominio", "Origen", "Modalidades a buscar"
 activas = fuentes[fuentes["Activa"].str.lower().isin(["sí", "si"])]
 por_confirmar = fuentes[fuentes["Verificación del dominio"].str.startswith("Por confirmar") | (fuentes["Dominio oficial"] == "")]
 grupos = sorted(g for g in activas["Grupo"].unique() if g)
+try:
+    _par = pd.read_excel(tmp_cfg, sheet_name="Parametros", header=None, dtype=str).fillna("")
+    PARAM_GEMINI = next((r[1] for r in _par.values if r[0] == "Completar campos con Gemini en el mapeo"), "Sí") or "Sí"
+except Exception:  # noqa: BLE001
+    PARAM_GEMINI = "Sí"
 clave = os.environ.get("GEMINI_API_KEY") or ui.secretos().get("GEMINI_API_KEY", "")
 if clave:
     os.environ["GEMINI_API_KEY"] = clave
@@ -165,6 +182,10 @@ with opciones:
     completo = o2.toggle("Revisión completa", help="Vuelve a abrir también las convocatorias ya conocidas, para detectar cambios. "
                          "Tarda bastante más. Igual se hace sola en cada fuente cada 30 días.")
     o3, o4 = st.columns(2)
+    cupo = st.slider("Convocatorias nuevas por búsqueda", 10, 100, 40, 5,
+                     help="Cuántas convocatorias nuevas traducir y completar con Gemini en cada búsqueda. Se eligen las más "
+                          "prometedoras (abiertas, con fecha próxima y elegibles); las demás quedan para la siguiente. "
+                          "Menos = más rápido.")
     paralelo = o3.slider("Sitios a la vez", 3, 12, 10, help="Más sitios a la vez = más rápido. Si la app se pone lenta, bájalo.")
     pausa = o4.slider("Segundos entre páginas del mismo sitio", 1.0, 5.0, 2.0, 0.5,
                       help="Pausa de cortesía para no saturar cada sitio. No se recomienda menos de 2.")
@@ -175,19 +196,32 @@ fallidas = sel["Estado de validación"].str.startswith(("Sitio no responde", "Bl
 n_sel = int((~fallidas).sum())
 primera_vez = not A.leer_archivo("historial_mapeo.json")
 completa_efectiva = completo or primera_vez
-minutos = max(1, round(n_sel * (1.6 if completa_efectiva else 0.35) * pausa / 2 / paralelo))
+minutos = max(1, round(n_sel * (1.6 if completa_efectiva else 0.35) * pausa / 2 / paralelo + (cupo * 9 / 60 if con_gemini else 0)))
 extra = [] if set(elegidos) == set(grupos) else [x for g in elegidos for x in ("--grupo", g)]
 extra += ["--paralelo", str(paralelo), "--pausa", str(pausa)]
-extra_mapeo = extra + (["--completo"] if completo else []) + ([] if con_gemini else ["--sin-gemini"])
+extra_mapeo = (extra + ["--maximo-nuevas", str(cupo)] + (["--completo"] if completo else [])
+               + ([] if con_gemini else ["--sin-gemini"]))
 
 with tarjeta:
     st.markdown("#### Buscar convocatorias nuevas")
     tiempo = f"unos {minutos} minutos" if minutos < 90 else f"cerca de {round(minutos / 60, 1)} horas"
-    st.write(f"Se revisarán **{n_sel} sitios oficiales** · tiempo estimado: **{tiempo}**"
-             + (" (la primera vez tarda más; las siguientes solo abren lo nuevo)" if primera_vez else "")
-             + (" · con Gemini completando los campos" if con_gemini else " · sin Gemini") + ".")
+    st.write(f"Se revisarán **{n_sel} sitios oficiales** y se traerán hasta **{cupo} convocatorias nuevas, traducidas y "
+             f"completas** · tiempo estimado: **{tiempo}**"
+             + (" (la primera vez tarda más; las siguientes solo abren lo nuevo)" if primera_vez else "") + ".")
+    if not con_gemini:
+        st.warning("Sin Gemini solo pasan las convocatorias que ya están en español y completas en su página. "
+                   + ("Enciéndelo en *Opciones de la búsqueda*." if clave else "Falta la clave GEMINI_API_KEY en los secretos."))
+    elif not str(PARAM_GEMINI).lower().startswith("s"):
+        st.warning("En la configuración, el parámetro «Completar campos con Gemini en el mapeo» está en «No»: Gemini no se "
+                   "usará. Cámbialo a «Sí» en la configuración (Mantenimiento de fuentes → Configuración).")
     if st.button("Buscar convocatorias nuevas", type="primary", disabled=not elegidos or OCUPADO, icon=":material/search:"):
         ejecutar("mapear", "Búsqueda de convocatorias" + (" (revisión completa)" if completo else ""), extra_mapeo)
+    if clave and st.button("Probar Gemini", icon=":material/network_check:",
+                           help="Hace una consulta mínima para comprobar que la clave y el modelo funcionan."):
+        from motor import externo as _ext
+        from motor import config as _cfgmod
+        ok, modelo_usado, mensaje = _ext.probar(clave, cfg=_cfgmod.cargar(tmp_cfg))
+        (st.success if ok else st.error)(f"{mensaje} Modelo: {modelo_usado or '—'}.")
     if OCUPADO:
         st.caption("Hay una búsqueda en curso; espera a que termine.")
     elif fallidas.any():
@@ -202,16 +236,34 @@ por_completar = A.items(E.ESTADO)
 if por_completar:
     with st.container(border=True):
         st.markdown(f"#### {len(por_completar)} convocatorias por completar")
-        st.caption("Las encontró la búsqueda, pero **no pasan a la bandeja** porque no están en español o les faltan datos "
-                   "obligatorios. El sistema las vuelve a intentar sola en cada búsqueda (hasta "
-                   f"{E.INTENTOS_MAXIMOS} veces), con Gemini leyendo su página oficial."
-                   + ("" if clave else " **Sin la clave de Gemini no se pueden traducir ni completar.**"))
+        st.caption("Gemini ya leyó su página, pero les faltan datos obligatorios, así que **no pasan a la bandeja**. El "
+                   f"sistema reintenta unas pocas en cada búsqueda (hasta {E.INTENTOS_MAXIMOS} veces cada una).")
+        if len(por_completar) > 100 and YO["rol"] == "admin":
+            st.warning(f"Hay **{len(por_completar)}** acumuladas de búsquedas anteriores, cuando todo lo encontrado se guardaba "
+                       "aunque no se pudiera completar. Conviene **vaciar la lista**: el sistema las olvida y las vuelve a "
+                       "encontrar en las próximas búsquedas, ahora eligiendo solo las mejores y completándolas antes de "
+                       "guardarlas.")
+            if st.button(f"Vaciar la lista ({len(por_completar)})", type="primary", icon=":material/delete_sweep:",
+                         disabled=OCUPADO):
+                tocadas = [i for i in por_completar if F.tocada_por_persona(i)]
+                borrar = [i for i in por_completar if not F.tocada_por_persona(i)]
+                A.borrar_items([i["id"] for i in borrar], f"Vaciar por completar: {len(borrar)}")
+                hist = A.leer_archivo("historial_mapeo.json")
+                if hist:
+                    h = json.loads(hist)
+                    for i in borrar:
+                        h.pop(i["datos"].get("Cómo aplicar", ""), None)
+                    A.guardar_archivo("historial_mapeo.json", json.dumps(h, ensure_ascii=False).encode("utf-8"))
+                st.success(f"Se vaciaron {len(borrar)}." + (f" Quedan {len(tocadas)} que alguien ya editó." if tocadas else ""))
+                st.rerun()
         tabla_pc = pd.DataFrame([{"id": i["id"], "Convocatoria": i["datos"].get("Nombre de la Convocatoria", ""),
                                   "Oferente": i["datos"].get("Nombre de la Fuente", ""),
                                   "Qué le falta": "; ".join(f.split(":")[0] for f in i["meta"].get("faltantes", [])) or "—",
                                   "Intentos": int(i["meta"].get("intentos", 0)),
                                   "Página": i["datos"].get("Cómo aplicar") if str(i["datos"].get("Cómo aplicar", "")).startswith("http") else None}
-                                 for i in por_completar])
+                                 for i in por_completar[:200]])
+        if len(por_completar) > 200:
+            st.caption(f"Se muestran 200 de {len(por_completar)}.")
         ev = st.dataframe(tabla_pc.drop(columns="id"), hide_index=True, width="stretch", on_select="rerun",
                           selection_mode="multi-row", key="tabla_pc", height=min(380, 38 + 35 * len(tabla_pc)),
                           column_config={"Página": st.column_config.LinkColumn(display_text="Abrir ↗"),
