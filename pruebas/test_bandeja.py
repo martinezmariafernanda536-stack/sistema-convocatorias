@@ -639,3 +639,74 @@ def test_control_de_entrada_idioma():
     assert E.en_espanol("Premio CRI IGNITE", "Nombre de la Convocatoria")
     assert not E.en_espanol("O edital oferece bolsas para pesquisadores com projetos")
     assert E.en_espanol("El programa apoya a jóvenes investigadores que deseen formarse.")
+
+
+def test_migra_datos_desde_el_repo_del_codigo(tmp_path, monkeypatch):
+    """Si los datos quedaron en el repositorio del código, al pasar a un repositorio de datos aparte se copian (no se
+    parte de la base inicial)."""
+    from bandeja import almacen as AL
+    raiz = tmp_path / "src" / "sistema-convocatorias"
+    raiz.mkdir(parents=True)
+    vieja = AL.AlmacenSQLite(raiz / "convocatorias.db")
+    vieja.guardar_archivo("historial_mapeo.json", b'{"x": 1}')
+    monkeypatch.setattr(AL, "RAIZ", raiz)
+
+    class RepoVacio:
+        sha, publico, revisado = None, False, 1e18
+
+        def remoto(self):
+            return self.sha
+
+        def descargar(self, destino):
+            pass
+
+        def existe(self):
+            return False
+
+        def subir(self, ruta, mensaje):
+            self.subido = Path(ruta).read_bytes()
+            self.sha = "x"
+    nuevo = AL.AlmacenSQLite(tmp_path / "local.db", sincronizador=RepoVacio(), base_inicial=AL.BASE_INICIAL)
+    assert nuevo.leer_archivo("historial_mapeo.json") == b'{"x": 1}'
+    monkeypatch.delenv("GITHUB_DATA_BRANCH", raising=False)
+    monkeypatch.setenv("GITHUB_DATA_REPO", "usuaria/sistema-convocatorias")
+    assert AL.rama_de_datos() == "datos" and not AL.datos_en_repo_de_codigo()   # mismo repo: rama aparte, sola
+    monkeypatch.setenv("GITHUB_DATA_BRANCH", "main")
+    assert AL.datos_en_repo_de_codigo()                                         # fijada a mano en main: aviso
+    monkeypatch.delenv("GITHUB_DATA_BRANCH")
+    monkeypatch.setenv("GITHUB_DATA_REPO", "usuaria/convocatorias-datos")
+    assert AL.rama_de_datos() == "main" and not AL.datos_en_repo_de_codigo()
+
+
+def test_crea_la_rama_de_datos_si_no_existe():
+    from bandeja.almacen import SincronizadorGitHub
+
+    class R:
+        def __init__(self, codigo, datos=None):
+            self.status_code, self._d, self.text = codigo, datos or {}, ""
+
+        def json(self):
+            return self._d
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(self.status_code)
+
+    class Sesion:
+        headers = {}
+        creada = None
+
+        def get(self, url, **kw):
+            if url.endswith("/repos/u/sistema-convocatorias"):
+                return R(200, {"private": False, "default_branch": "main"})
+            if "/branches/datos" in url:
+                return R(404)
+            if url.endswith("/git/ref/heads/main"):
+                return R(200, {"object": {"sha": "abc123"}})
+            return R(404)
+
+        def post(self, url, json=None, **kw):
+            Sesion.creada = json
+            return R(201)
+    SincronizadorGitHub("u/sistema-convocatorias", "t", rama="datos", sesion=Sesion())
+    assert Sesion.creada == {"ref": "refs/heads/datos", "sha": "abc123"}

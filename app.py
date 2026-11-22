@@ -236,6 +236,13 @@ paginas = {
 if yo["rol"] == "admin":
     paginas["Mi cuenta"].append(st.Page("paginas/usuarios.py", title="Usuarios", icon=":material/group:"))
 
+if yo["rol"] == "admin":
+    from bandeja.almacen import datos_en_repo_de_codigo
+    if datos_en_repo_de_codigo():
+        st.error("**Los datos se están guardando en la rama principal del repositorio del código.** Cada guardado hace que "
+                 "Streamlit recargue la aplicación. Borra el secreto `GITHUB_DATA_BRANCH` (o ponle `datos`): el sistema "
+                 "guardará los datos en la rama «datos» del mismo repositorio, sin perder nada.")
+
 with st.sidebar:
     st.markdown(f"**{yo['nombre']}**  \n<span style='color:#5b6472'>{ROL_LEGIBLE.get(yo['rol'], yo['rol'])}</span>",
                 unsafe_allow_html=True)

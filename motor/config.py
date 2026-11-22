@@ -85,6 +85,7 @@ class Config:
     columnas_airtable: list = field(default_factory=list)
     ruta: Path = RUTA_CONFIG
     palabras_modalidad: dict = field(default_factory=dict)  # modalidad -> [términos]
+    radar: list = field(default_factory=list)  # agregadores y portales para descubrir convocatorias fuera de las fuentes
 
     def palabras_de(self, modalidades):
         if not self.palabras_modalidad:
@@ -161,5 +162,16 @@ def cargar(ruta=RUTA_CONFIG):
 
     columnas = RUTA_COLUMNAS.read_text(encoding="utf-8").splitlines() if RUTA_COLUMNAS.exists() else []
 
+    radar = []
+    if "Radar" in wb.sheetnames:
+        for i, f in enumerate(_filas(wb["Radar"]), start=2):
+            paginas = [u.strip() for u in str(f.get("Páginas (separadas por ;)") or "").split(";") if u.strip()]
+            if not f.get("ID") or not paginas:
+                continue
+            radar.append(Fuente(
+                id=str(f.get("ID")).strip(), activa=_si(f.get("Activa")), tipo=str(f.get("Tipo") or "Agregador").strip(),
+                nombre=str(f.get("Nombre") or "").strip(), pais="", dominio=paginas[0], url_becas=";".join(paginas),
+                oficial="No Oficial", idioma="", requiere_navegador=_si(f.get("Requiere navegador")), fila=i,
+                modalidades=modalidades_de(f.get("Modalidades a buscar"))))
     return Config(fuentes, palabras_beca, exclusion, reglas, icetex_nombres, icetex_paginas,
-                  icetex_palabras, tematicas, alineacion, parametros, columnas, Path(ruta), palabras_modalidad)
+                  icetex_palabras, tematicas, alineacion, parametros, columnas, Path(ruta), palabras_modalidad, radar)

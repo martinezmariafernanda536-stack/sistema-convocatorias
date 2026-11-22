@@ -135,7 +135,25 @@ class SincronizadorGitHub:
         if r.status_code == 404:
             raise RuntimeError(f"No existe el repositorio {self.repo} o el token no tiene acceso. Créalo como privado en GitHub.")
         r.raise_for_status()
-        self.publico = not r.json().get("private", False)
+        info = r.json()
+        self.publico = not info.get("private", False)
+        self._asegurar_rama(info.get("default_branch") or "main")
+
+    def _asegurar_rama(self, principal):
+        """Si la rama de datos no existe, se crea como copia de la principal (con lo que ya tenga guardado)."""
+        if self.rama == principal:
+            return
+        r = self.http.get(f"{self.API}/repos/{self.repo}/branches/{self.rama}", timeout=30)
+        if r.status_code != 404:
+            r.raise_for_status()
+            return
+        base = self.http.get(f"{self.API}/repos/{self.repo}/git/ref/heads/{principal}", timeout=30)
+        base.raise_for_status()
+        sha = base.json()["object"]["sha"]
+        c = self.http.post(f"{self.API}/repos/{self.repo}/git/refs", json={"ref": f"refs/heads/{self.rama}", "sha": sha},
+                           timeout=30)
+        if c.status_code not in (201, 422):  # 422: otra sesión la acaba de crear
+            c.raise_for_status()
 
     def _url(self):
         return f"{self.API}/repos/{self.repo}/contents/{self.archivo}"
@@ -192,9 +210,14 @@ class AlmacenSQLite:
         if self.sync:
             self.sync.descargar(self.ruta)
         semilla = Path(base_inicial) if base_inicial else None
+        # Si antes los datos se guardaban por error en el repositorio del código, ahí quedó una copia completa
+        # (convocatorias, usuarios, historial): al pasar a un repositorio de datos aparte, se parte de esa copia.
+        anterior = RAIZ / "convocatorias.db"
+        if self.sync and not self.sync.sha and not self.ruta.exists() and anterior.exists() and anterior != self.ruta:
+            semilla = anterior
         if semilla and semilla.exists() and not (self.sync and self.sync.sha) and not self.ruta.exists():
             import shutil
-            shutil.copy(semilla, self.ruta)  # primera vez: se parte de las convocatorias migradas
+            shutil.copy(semilla, self.ruta)  # primera vez: se parte de la copia anterior o de las convocatorias migradas
         con = self._abrir()
         con.executescript(ESQUEMA)
         con.commit()
@@ -481,10 +504,29 @@ def sincronizador_configurado():
     return "GitHub" if os.environ.get("GITHUB_DATA_REPO") else "Hugging Face" if os.environ.get("HF_DATASET_REPO") else ""
 
 
+def mismo_repo_que_el_codigo():
+    """True si GITHUB_DATA_REPO es el mismo repositorio del que Streamlit tomó el código (/mount/src/<repositorio>)."""
+    repo = os.environ.get("GITHUB_DATA_REPO", "").strip().strip("/").lower()
+    return bool(repo) and RAIZ.parent.name == "src" and repo.split("/")[-1] == RAIZ.name.lower()
+
+
+def rama_de_datos():
+    """Rama donde se guardan los datos. Si es el mismo repositorio del código, nunca la rama principal: cada guardado
+    haría que Streamlit recargara la aplicación. Se usa la rama «datos» (se crea sola)."""
+    elegida = os.environ.get("GITHUB_DATA_BRANCH", "").strip()
+    if elegida:
+        return elegida
+    return "datos" if mismo_repo_que_el_codigo() else "main"
+
+
+def datos_en_repo_de_codigo():
+    """True si los datos se guardan en la misma rama que Streamlit vigila (solo si alguien lo fijó a mano)."""
+    return mismo_repo_que_el_codigo() and rama_de_datos() in ("main", "master")
+
+
 def crear_sincronizador():
     if os.environ.get("GITHUB_DATA_REPO"):
-        return SincronizadorGitHub(os.environ["GITHUB_DATA_REPO"], os.environ.get("GITHUB_TOKEN", ""),
-                                   rama=os.environ.get("GITHUB_DATA_BRANCH") or "main")
+        return SincronizadorGitHub(os.environ["GITHUB_DATA_REPO"], os.environ.get("GITHUB_TOKEN", ""), rama=rama_de_datos())
     if os.environ.get("HF_DATASET_REPO"):
         return SincronizadorHF(os.environ["HF_DATASET_REPO"], os.environ.get("HF_TOKEN"))
     return None

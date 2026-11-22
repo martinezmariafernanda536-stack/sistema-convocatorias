@@ -88,7 +88,7 @@ def iniciar(almacen, comando, etiqueta, extra, usuario, config):
         return True
 
 
-MODULOS = ["mapeo", "motor.extraer", "motor.externo", "motor.reglas", "motor.salidas", "calidad.reglas", "calidad.entrada",
+MODULOS = ["mapeo", "motor.extraer", "motor.externo", "motor.reglas", "motor.salidas", "motor.radar", "calidad.reglas", "calidad.entrada",
            "bandeja.flujo", "tareas"]
 
 
@@ -171,7 +171,8 @@ def _correr(almacen, tarea, extra, config):
             if tarea.comando == "validar-fuentes":
                 almacen.guardar_archivo(CFG, (tmp / CFG).read_bytes())
             if resultado and Path(str(resultado)).exists():
-                destino = {"mapear": "ultimo_mapeo.xlsx", "buscar-externo": "ultima_busqueda_externa.xlsx"}.get(tarea.comando)
+                destino = {"mapear": "ultimo_mapeo.xlsx", "descubrir": "ultimo_descubrimiento.xlsx",
+                           "buscar-externo": "ultima_busqueda_externa.xlsx"}.get(tarea.comando)
                 if destino:
                     almacen.guardar_archivo(destino, Path(resultado).read_bytes())
             almacen.guardar_archivo(f"ultimo_{tarea.comando}.json",

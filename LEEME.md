@@ -227,6 +227,17 @@ de la página más el ancla de la sección (`…/becas#beca-al-talento-academico
 - Si el contenido de los desplegables solo aparece al hacer clic (se carga con JavaScript), la página tiene que leerse con
   navegador: marcar la fuente con «Requiere navegador» en la configuración (necesita Playwright en el servidor).
 
+## Dónde se guardan los datos
+
+El código vive en la rama `main` del repositorio, que es la que Streamlit vigila: cada cambio ahí actualiza la aplicación.
+Por eso los datos (convocatorias, usuarios, historial, configuración) **nunca** se guardan en `main`:
+
+- Si `GITHUB_DATA_REPO` es un repositorio aparte (por ejemplo `convocatorias-datos`), se guardan en su rama principal.
+- Si `GITHUB_DATA_REPO` es el **mismo** repositorio del código, se guardan solos en la rama **`datos`**, que el sistema
+  crea la primera vez como copia de `main`. No hay que crear nada ni cambiar secretos.
+
+Para actualizar el sistema basta con subir los archivos nuevos a `main`, como siempre: los datos no se tocan.
+
 ## La búsqueda trae pocas, pero completas
 
 Cada búsqueda tiene dos pasos:
@@ -357,6 +368,14 @@ Desde la página **Buscar convocatorias**:
 2. **Ejecutar mapeo ahora**: se puede elegir qué grupos revisar.
    - **Modo rápido**, el normal: solo abre las convocatorias que no ha visto antes. Las conocidas se marcan como «siguen publicadas» sin volver a abrirlas. Cada fuente tiene además una **revisión completa automática cada 30 días**, para detectar cambios de fecha y nuevas ediciones con el mismo enlace. La primera corrida siempre es completa.
    - **Revisión completa**, con el interruptor de la página: vuelve a abrir todo.
+   - **Seguimiento de ediciones (año tras año):** en cada búsqueda se vuelve a abrir la página oficial («Cómo aplicar») de hasta 40 convocatorias de la base que ya cerraron, incluidas las que vinieron de Airtable, aunque la fuente ya no las enlace o su sitio no esté entre las fuentes. Van primero las que se acercan al aniversario de su cierre, y cada una se revisa como mucho cada 30 días. Si la página publica una fecha nueva, la convocatoria se completa con Gemini y llega a la bandeja como **nueva edición**; si sigue cerrada, se vuelve a mirar al mes siguiente. El número se cambia en el parámetro «Ediciones anteriores a revisar por búsqueda» (0 lo apaga).
+
+**Descubrir convocatorias fuera de las fuentes** (botón aparte en *Buscar convocatorias*). No recorre las fuentes: busca oferentes nuevos por tres caminos.
+   - **Agregadores como radar.** Por ejemplo Opportunity Desk o Scholars4Dev. El sistema lee sus publicaciones nuevas, sigue el enlace «Apply / Official website» hasta la **página oficial** del oferente y registra solo esa. Ignora redes sociales, otros agregadores, boletines, formularios e ICETEX. Si una publicación no trae enlace oficial, no se usa. Las publicaciones ya vistas no se vuelven a abrir.
+   - **Portal de financiación de la Unión Europea (Funding & Tenders).** Se consulta su búsqueda pública: convocatorias abiertas o por abrir que mencionan Colombia, América Latina, terceros países, cooperación internacional o países en desarrollo.
+   - **Fuentes sugeridas.** Los sitios oficiales que no están en la lista y aportaron convocatorias aparecen en una tabla. El administrador marca los que quiere y quedan como fuentes nuevas («Por validar»).
+   - Lo encontrado pasa por los mismos filtros que la búsqueda normal (Gemini, Colombia elegible, duplicados, control de entrada) y usa la misma meta y el mismo cupo de Gemini.
+   - Los sitios de radar se editan en la hoja **«Radar»** de la configuración (ID, Activa, Tipo, Nombre, Páginas separadas por «;»). Parámetros: «Publicaciones a revisar por agregador» (40) y «Convocatorias del portal de la UE por búsqueda» (30).
    - **Se saltan las fuentes que fallaron en la última validación:** sitio bloqueado, sin respuesta o redirigido.
    - **Velocidad**, en la página: cuántas fuentes a la vez (10 por defecto) y la pausa entre páginas del mismo sitio (2 segundos). Con todas las fuentes (más de 200) tarda alrededor de una hora; se recomienda un grupo por día. Revisa 6 fuentes a la vez, respetando 3 segundos entre páginas del mismo sitio.
 

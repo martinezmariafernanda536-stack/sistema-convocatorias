@@ -492,3 +492,192 @@ def test_meta_de_completas_sigue_hasta_cumplirla(entorno, tmp_path, monkeypatch)
     a = AlmacenSQLite(tmp_path / "base.db")
     # siguió después de la primera completa y de las que no servían, hasta agotar las candidatas o llegar a la meta
     assert len(a.items("Por revisar")) >= 1 and contador["n"] >= 4
+
+
+def test_seguimiento_de_ediciones_elige_las_cerradas_y_rota(tmp_path):
+    """Año tras año: las convocatorias de la base (también las de Airtable) que ya cerraron se vuelven a abrir para
+    buscar su nueva edición; primero las que se acercan al aniversario de su cierre, y cada una como mucho cada 30 días."""
+    from motor import config as C
+    from motor.historial import Historial
+    hoy = date(2026, 11, 20)
+    tec = C.Fuente(id="TEC", activa=True, tipo="Universidad", nombre="Tec", pais="México", dominio="https://tec.mx",
+                   url_becas="https://tec.mx/es/profesional/becas", oficial="No Oficial", idioma="es",
+                   requiere_navegador=False, fila=0)
+    base = [
+        {"Nombre de la Convocatoria": "Beca A", "Cómo aplicar": "https://tec.mx/es/profesional/becas#beca-liderazgo",
+         "Fecha Límite de Aplicación": "15/12/2025"},                             # aniversario en 25 días: primero
+        {"Nombre de la Convocatoria": "Beca B", "Cómo aplicar": "https://otra.org/beca-b",
+         "Fecha Límite de Aplicación": "30/6/2026", "Nombre de la Fuente": "Fundación Otra"},  # sitio fuera de las fuentes
+        {"Nombre de la Convocatoria": "Abierta", "Cómo aplicar": "https://tec.mx/abierta",
+         "Fecha Límite de Aplicación": "1/3/2027"},                               # sigue abierta: no
+        {"Nombre de la Convocatoria": "Permanente", "Cómo aplicar": "https://tec.mx/perm",
+         "¿La convocatoria es permanente?": "Si"},                                # permanente: no
+        {"Nombre de la Convocatoria": "Sin fecha vieja", "Cómo aplicar": "https://tec.mx/vieja",
+         "Fecha de Registro": "10/2/2025"},                                       # sin fecha y registrada otro año: sí
+        {"Nombre de la Convocatoria": "Sin enlace", "Fecha Límite de Aplicación": "1/1/2025"},
+    ]
+    h = Historial(tmp_path / "h.json")
+    sel = programa.ediciones_a_seguir(base, [tec], h, hoy, limite=10)
+    urls = {u for _, lista in sel.values() for u, _ in lista}
+    assert urls == {"https://tec.mx/es/profesional/becas#beca-liderazgo", "https://otra.org/beca-b", "https://tec.mx/vieja"}
+    assert sel["SEG-otra.org"][0].tipo == "Seguimiento de ediciones" and sel["SEG-otra.org"][0].nombre == "Fundación Otra"
+    # con límite 1 va la más cercana al aniversario de su cierre
+    uno = programa.ediciones_a_seguir(base, [tec], h, hoy, limite=1)
+    assert [u for _, l in uno.values() for u, _ in l] == ["https://tec.mx/es/profesional/becas#beca-liderazgo"]
+    # revisada hace poco: no se repite hasta pasados 30 días
+    h.marcar_seguida("https://tec.mx/es/profesional/becas#beca-liderazgo", "2026-11-10")
+    h.guardar()
+    h = Historial(tmp_path / "h.json")
+    urls = {u for _, l in programa.ediciones_a_seguir(base, [tec], h, hoy, 10).values() for u, _ in l}
+    assert "https://tec.mx/es/profesional/becas#beca-liderazgo" not in urls
+    urls = {u for _, l in programa.ediciones_a_seguir(base, [tec], h, date(2026, 12, 15), 10).values() for u, _ in l}
+    assert "https://tec.mx/es/profesional/becas#beca-liderazgo" in urls
+
+
+def test_seguimiento_reabre_la_pagina_aunque_sea_conocida():
+    """Aunque el modo rápido salte las convocatorias ya conocidas, la que está en seguimiento se vuelve a leer, y si su
+    página trae una fecha nueva llega como nueva edición (no como duplicado de la del año pasado)."""
+    import argparse
+    from motor import config as C
+    from motor import reglas as RG
+    cfg = C.cargar()
+    fuente = C.Fuente(id="TEC", activa=True, tipo="Universidad", nombre="Tecnológico de Monterrey", pais="México",
+                      dominio="https://tec.mx", url_becas="https://tec.mx/es/profesional/becas", oficial="No Oficial",
+                      idioma="es", requiere_navegador=False, fila=0, modalidades=["Beca"])
+    args = argparse.Namespace(hoy=date(2026, 11, 20), prueba=str(PAGINAS), pausa=0, todas=False)
+    url = "https://tec.mx/es/profesional/becas#beca-liderazgo"
+    base = pd.DataFrame([{"Nombre de la Convocatoria": "Beca de Liderazgo", "Cómo aplicar": url,
+                          "Fecha Límite de Aplicación": "30/4/2026", "Fecha de Registro": "1/2/2026"}])
+
+    class SinIcetex:
+        def revisar(self, *a):
+            return False, ""
+    conocidas = frozenset({url, "https://tec.mx/es/profesional/becas#beca-al-talento-academico"})
+    res = programa.revisar_fuente(fuente, cfg, args, SinIcetex(), RG.IndiceAirtable(base, 90), conocidas,
+                                  completa=False, seguir=[(url, "Beca de Liderazgo")])
+    por_url = {u: (t, f, m) for t, u, f, m in res["hallazgos"]}
+    assert "https://tec.mx/es/profesional/becas#beca-al-talento-academico" in res["sin_cambios"]  # la otra se salta
+    tipo, fila, motivo = por_url[url]
+    assert tipo == "revision" and fila["Fecha Límite de Aplicación"] == "30/4/2027"
+    assert "Nueva edición" in fila["[Sistema] Duplicado en Airtable"]
+    assert res["seguidas"] == [url]
+
+
+def test_seguimiento_sitio_fuera_de_las_fuentes():
+    """Si la página de la convocatoria no está entre las fuentes, se abre igual con una fuente provisional."""
+    import argparse
+    from motor import config as C
+    from motor import reglas as RG
+    cfg = C.cargar()
+    base = [{"Nombre de la Convocatoria": "Beca Líderes del Mañana",
+             "Cómo aplicar": "https://tec.mx/es/profesional/becas/beca-lideres-del-manana",
+             "Fecha Límite de Aplicación": "1/12/2025", "Nombre de la Fuente": "Tec"}]
+    from motor.historial import Historial
+    import tempfile
+    sel = programa.ediciones_a_seguir(base, [], Historial(Path(tempfile.mkdtemp()) / "h.json"), date(2026, 11, 20))
+    (fuente, lista), = sel.values()
+    args = argparse.Namespace(hoy=date(2026, 11, 20), prueba=str(PAGINAS), pausa=0, todas=False)
+
+    class SinIcetex:
+        def revisar(self, *a):
+            return False, ""
+    res = programa.revisar_fuente(fuente, cfg, args, SinIcetex(), RG.IndiceAirtable(None, 90), seguir=lista)
+    assert res["paginas"] == [] and res["seguidas"] == [lista[0][0]]
+    assert [u for _, u, _, _ in res["hallazgos"]] == [lista[0][0]]
+
+
+def test_mapeo_hace_seguimiento_de_ediciones_de_la_base(entorno, tmp_path, monkeypatch):
+    monkeypatch.setenv("MAPEO_HISTORIAL", str(tmp_path / "datos" / "historial.json"))
+    air = pd.read_csv(RAIZ / "datos" / "airtable_actual.csv")
+    i = len(air)
+    air.loc[i, "Nombre de la Convocatoria"] = "Beca Líderes del Mañana"
+    air.loc[i, "Cómo aplicar"] = "https://tec.mx/es/profesional/becas/beca-lideres-del-manana"
+    air.loc[i, "Fecha Límite de Aplicación"] = "1/12/2025"
+    ruta_csv = tmp_path / "air.csv"
+    air.to_csv(ruta_csv, index=False)
+    ruta = correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY, "--csv", str(ruta_csv))
+    desc = pd.read_excel(ruta, sheet_name="Descartadas automáticamente", dtype=str).fillna("")
+    rev = pd.read_excel(ruta, sheet_name="Revisión", dtype=str).fillna("")
+    urls = set(desc.astype(str).stack()) | set(rev.astype(str).stack())
+    assert any("beca-lideres-del-manana" in u for u in urls)  # se volvió a abrir aunque ninguna fuente activa la enlaza
+    import json
+    h = json.loads((tmp_path / "datos" / "historial.json").read_text(encoding="utf-8"))
+    assert "https://tec.mx/es/profesional/becas/beca-lideres-del-manana" in h["_seguimiento_ediciones"]
+
+
+class _SinIcetex:
+    def revisar(self, *a):
+        return False, ""
+
+
+def test_radar_lee_el_agregador_y_registra_solo_la_pagina_oficial():
+    """Descubrir: el agregador solo sirve de radar. Se sigue el enlace «Apply / Official website» y se registra la
+    página del oferente (sin parámetros de rastreo); redes sociales, otros agregadores y formularios se ignoran."""
+    import argparse
+    from motor import config as C
+    from motor import reglas as RG
+    cfg = C.cargar()
+    od = next(r for r in cfg.radar if r.id == "RAD-OD")
+    args = argparse.Namespace(hoy=date(2026, 11, 9), prueba=str(PAGINAS), pausa=0, todas=False)
+    res = programa.revisar_radar(od, cfg, args, _SinIcetex(), RG.IndiceAirtable(None, 90))
+    por_url = {u: f for _, u, f, _ in res["hallazgos"]}
+    assert set(por_url) == {"https://www.fundacionejemplo.org/becas/liderazgo-2027",
+                            "https://www.unesco.org/en/prizes/example-peace-education-2027",
+                            "https://www.uu.nl/en/scholarships/utrecht-excellence-scholarships"}
+    assert not any("opportunitydesk" in u for u in por_url)
+    nueva = por_url["https://www.fundacionejemplo.org/becas/liderazgo-2027"]
+    assert nueva["[Sistema] Fuente ID"] == "RAD-fundacionejemplo.org"        # sitio que no está entre las fuentes
+    assert nueva["Nombre de la Fuente"] == "Fundación Ejemplo"                 # nombre tomado del sitio oficial
+    assert nueva["Fecha Límite de Aplicación"] == "15/3/2027"
+    assert "Opportunity Desk" in nueva["[Sistema] Página donde se encontró"]
+    # si el sitio oficial ya es una fuente, se usa esa fuente (con su actor y su carácter oficial)
+    assert por_url["https://www.uu.nl/en/scholarships/utrecht-excellence-scholarships"]["[Sistema] Fuente ID"] == "UNI-NL-01"
+    # las publicaciones quedan anotadas para no volver a abrirlas
+    assert len(res["sin_cambios"]) == 3
+    # en la siguiente búsqueda, lo ya visto no se vuelve a abrir
+    res2 = programa.revisar_radar(od, cfg, args, _SinIcetex(), RG.IndiceAirtable(None, 90),
+                                  frozenset(res["sin_cambios"]))
+    assert res2["hallazgos"] == []
+
+
+def test_radar_portal_de_la_union_europea():
+    import argparse
+    from motor import config as C
+    from motor import reglas as RG
+    from motor import radar as R
+    items, nota = R.portal_ue(10, date(2026, 11, 9), str(PAGINAS))
+    assert [t for _, t, _ in items] == ["Research cooperation with Latin America on climate adaptation"]  # la cerrada no
+    assert "Deadline: 2027-02-17" in items[0][2]
+    cfg = C.cargar()
+    ue = next(r for r in cfg.radar if r.id == "RAD-UE")
+    args = argparse.Namespace(hoy=date(2026, 11, 9), prueba=str(PAGINAS), pausa=0, todas=False)
+    res = programa.revisar_radar(ue, cfg, args, _SinIcetex(), RG.IndiceAirtable(None, 90))
+    (tipo, url, fila, _), = res["hallazgos"]
+    assert tipo == "revision" and url.endswith("topic-details/HORIZON-CL5-2027-01-12")
+    assert fila["Fecha Límite de Aplicación"] == "17/2/2027" and fila["Oficial / No Oficial"] == "Oficial"
+
+
+def test_descubrir_es_una_busqueda_aparte_con_fuentes_sugeridas(entorno, tmp_path, monkeypatch):
+    monkeypatch.setenv("MAPEO_HISTORIAL", str(tmp_path / "datos" / "historial.json"))
+    ruta = correr("descubrir", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY, "--sin-gemini")
+    assert Path(ruta).name.startswith("descubrimiento_")
+    hojas = pd.read_excel(ruta, sheet_name=None, dtype=str)
+    rev = hojas["Revisión"].fillna("")
+    assert "https://www.fundacionejemplo.org/becas/liderazgo-2027" in set(rev.astype(str).stack())
+    assert not any("ahk.de" in v for v in rev.astype(str).stack())   # no recorre las fuentes normales
+    sug = hojas["Fuentes sugeridas"].fillna("")
+    assert list(sug["Dominio oficial"]) == ["https://fundacionejemplo.org"]  # UNESCO, Utrecht y la UE ya son fuentes
+    assert sug.iloc[0]["Oferente"] == "Fundación Ejemplo"
+
+
+def test_agregar_fuente_sugerida_por_el_radar(tmp_path):
+    from openpyxl import load_workbook
+    cfg = tmp_path / "c.xlsx"
+    shutil.copy(RAIZ / "config" / "configuracion_mapeo_becas.xlsx", cfg)
+    programa.agregar_fuentes(cfg, [{"Oferente": "Fundación Ejemplo", "Dominio oficial": "https://fundacionejemplo.org",
+                                    "Tipo de actor": "Por clasificar", "Oficial / No Oficial": "No Oficial",
+                                    "Convocatorias encontradas": "Beca X"}], origen="Descubrimiento (radar)")
+    ws = load_workbook(cfg)["Fuentes"]
+    cab = [c.value for c in ws[1]]
+    ultima = {cab[i]: c.value for i, c in enumerate(ws[ws.max_row])}
+    assert ultima["Nombre"] == "Fundación Ejemplo" and ultima["Origen"] == "Descubrimiento (radar)"

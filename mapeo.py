@@ -191,14 +191,73 @@ def candidato_fechas(datos, hoy):
             "Fecha Límite de Aplicación": f(datos.get("cierre")), "Fecha de Registro": f(hoy)}
 
 
-def revisar_fuente(fuente, cfg, args, icetex, duplicados, conocidas=frozenset(), completa=True):
+def ediciones_a_seguir(base, fuentes, historial, hoy, limite=40, cada=30):
+    """Convocatorias de la base (incluidas las que vinieron de Airtable) que ya cerraron y pueden abrir una nueva edición.
+
+    Se vuelve a abrir su página oficial («Cómo aplicar») aunque las páginas de las fuentes ya no la enlacen. Se rota: cada
+    una se revisa como mucho cada `cada` días y primero las que se acercan al aniversario de su cierre (las convocatorias
+    anuales suelen abrir unos meses antes de esa fecha). Devuelve {id de fuente: [(url, nombre, fila de la base)]}."""
+    from calidad.reglas import fecha as _fecha
+    from motor.config import Fuente
+    por_url = {}
+    for d in base or []:
+        url = str(d.get("Cómo aplicar") or "").strip()
+        if not url.lower().startswith("http") or url.lower().endswith(".pdf"):
+            continue
+        if str(d.get("¿La convocatoria es permanente?") or "").strip().lower().startswith("s"):
+            continue
+        cierre = _fecha(d.get("Fecha Límite de Aplicación"))
+        registro = _fecha(d.get("Fecha de Registro"))
+        if cierre:
+            if cierre >= hoy:
+                continue  # sigue abierta: no hay nueva edición que buscar
+        elif not registro or registro.year >= hoy.year:
+            continue
+        dias = historial.dias_desde_seguimiento(url, hoy.isoformat())
+        if dias is not None and dias < cada:
+            continue
+        ref = cierre or registro
+        try:
+            aniversario = ref.replace(year=hoy.year)
+        except ValueError:  # 29 de febrero
+            aniversario = ref.replace(year=hoy.year, day=28)
+        if aniversario < hoy:
+            aniversario = aniversario.replace(year=hoy.year + 1)
+        faltan = (aniversario - hoy).days  # pocos días = la nueva edición debería estar publicada ya o pronto
+        previo = por_url.get(url)
+        if previo is None or (ref and previo[0] > faltan):
+            por_url[url] = (faltan, dias is not None, d)
+    elegidas = sorted(por_url.items(), key=lambda kv: (kv[1][1], kv[1][0]))[: max(0, int(limite))]
+    salida = {}
+    for url, (_, _, d) in elegidas:
+        f = next((f for f in fuentes if extraer.es_del_dominio(url, f.dominio or f.url_becas)), None)
+        if f is None:  # el sitio no está entre las fuentes: se usa una fuente provisional con los datos de la base
+            host = extraer.dominio_base(url)
+            if not host:
+                continue
+            nombre = str(d.get("Nombre de la Fuente") or d.get("Nombre de actor en CICLOPE") or host)
+            f = Fuente(id="SEG-" + host, activa=True, tipo="Seguimiento de ediciones", nombre=nombre, pais="",
+                       dominio=host, url_becas=url, oficial=str(d.get("Oficial / No Oficial") or "No Oficial"),
+                       idioma="", requiere_navegador=False, fila=0,
+                       actor=str(d.get("Nombre de actor en CICLOPE") or ""))
+        salida.setdefault(f.id, (f, []))[1].append((url, str(d.get("Nombre de la Convocatoria") or "")))
+    return salida
+
+
+def revisar_fuente(fuente, cfg, args, icetex, duplicados, conocidas=frozenset(), completa=True, seguir=(), solo_seguir=False):
     """Lee una fuente y devuelve sus hallazgos sin tocar nada compartido (se puede correr en paralelo).
 
     Modo rápido (completa=False): solo se abren las convocatorias que no se habían visto antes; las conocidas
     se marcan como «siguen publicadas» sin volver a abrirlas."""
     hoy = args.hoy
     lector = crear_lector(cfg, args)
-    paginas, nota = extraer.descubrir_paginas(fuente, lector, cfg)
+    # seguir: páginas que se abren directamente aunque la fuente no las enlace: (url, nombre[, html ya leído[, origen]])
+    seguir = [tuple(x) + (None,) * (4 - len(x)) for x in seguir]
+    forzar = {x[0] for x in seguir}
+    if solo_seguir or fuente.tipo == "Seguimiento de ediciones":
+        paginas, nota = [], "Seguimiento de ediciones"
+    else:
+        paginas, nota = extraer.descubrir_paginas(fuente, lector, cfg)
     hallazgos, analizadas, leida, vistas, sin_cambios = [], 0, False, set(), []
     terminos = cfg.palabras_de(fuente.modalidades)
 
@@ -246,7 +305,7 @@ def revisar_fuente(fuente, cfg, args, icetex, duplicados, conocidas=frozenset(),
             if url_s in vistas:
                 continue
             vistas.add(url_s)
-            if not completa and url_s in conocidas:
+            if not completa and url_s in conocidas and url_s not in forzar:
                 sin_cambios.append(url_s)
                 continue
             sub = Respuesta(url=url_s, estado=200, html=extraer.html_de_seccion(titulo, contenido, "", lang))
@@ -271,7 +330,7 @@ def revisar_fuente(fuente, cfg, args, icetex, duplicados, conocidas=frozenset(),
             if url in vistas:
                 continue
             vistas.add(url)
-            if not completa and url in conocidas:
+            if not completa and url in conocidas and url not in forzar:
                 sin_cambios.append(url)
                 continue
             if url.lower().endswith(".pdf"):
@@ -283,8 +342,117 @@ def revisar_fuente(fuente, cfg, args, icetex, duplicados, conocidas=frozenset(),
             if r is not resp and por_secciones(r, pagina):
                 continue
             analizar(r, url, texto_enlace, pagina)
-    return {"paginas": paginas, "nota": nota, "analizadas": analizadas, "leida": leida, "hallazgos": hallazgos,
+    # seguimiento de ediciones: las que las páginas de la fuente ya no enlazan se abren directamente
+    seguidas = []
+    from motor import radar as _radar
+    for url, nombre, html_listo, origen in seguir:
+        if DETENER.is_set():
+            break
+        seguidas.append(url)
+        if url in vistas:
+            continue
+        vistas.add(url)
+        base_url, _, ancla = url.partition("#")
+        r = (Respuesta(url=url, estado=200, html=html_listo) if html_listo else
+             lector.leer(base_url, forzar_navegador=fuente.requiere_navegador))
+        if not r.ok:
+            continue
+        if fuente.tipo == _radar.TIPO_DESCUBIERTA:
+            if _radar.descartable(r.url):  # el enlace terminó en un agregador, una red social o un formulario
+                continue
+            if fuente.nombre == fuente.dominio:
+                fuente.nombre = _radar.nombre_del_sitio(r.html) or fuente.nombre
+        leida = leida or solo_seguir or fuente.tipo == "Seguimiento de ediciones"
+        origen = origen or f"{base_url} (seguimiento de una convocatoria de la base)"
+        if ancla and not html_listo:  # era una sección de una página con varias convocatorias: se busca esa sección
+            secs = {a: (t, c) for t, a, c in extraer.secciones(r.html, r.url, terminos)}
+            if ancla not in secs:
+                continue
+            t, c = secs[ancla]
+            lang = (re.search(r"<html[^>]*\blang=[\"']?([\w-]+)", r.html[:2000], re.I) or [None, ""])[1]
+            sub = Respuesta(url=url, estado=200, html=extraer.html_de_seccion(t, c, "", lang))
+            analizar(sub, url, t, origen, seccion_de=base_url, contexto=extraer.contexto_general(r.html, terminos))
+        else:
+            analizar(r, url, nombre, origen)
+    return {"paginas": paginas, "seguidas": seguidas, "nota": nota, "analizadas": analizadas, "leida": leida, "hallazgos": hallazgos,
             "sin_cambios": sin_cambios, "completa": completa}
+
+
+def revisar_radar(radar, cfg, args, icetex, duplicados, conocidas=frozenset()):
+    """Descubrir: lee un agregador (solo como radar) o el portal de la UE y analiza las páginas OFICIALES que encuentra."""
+    from motor import radar as R
+    lector = crear_lector(cfg, args)
+    res = {"paginas": [], "nota": "", "analizadas": 0, "leida": False, "hallazgos": [], "sin_cambios": [], "completa": False}
+    objetivos = {}  # url oficial -> (nombre, html ya armado o None, origen)
+    if radar.tipo == R.TIPO_UE:
+        maximo = int(cfg.p("Convocatorias del portal de la UE por búsqueda", 30) or 30)
+        items, nota = R.portal_ue(maximo, args.hoy, getattr(args, "prueba", None))
+        res["nota"], res["leida"] = nota, bool(items) or not nota
+        for url, titulo, html in items:
+            if url not in conocidas:
+                objetivos[url] = (titulo, html, f"{radar.nombre} (búsqueda pública del portal)")
+    else:
+        maximo = int(cfg.p("Publicaciones a revisar por agregador", 40) or 40)
+        posts, vistos = [], set()
+        for pagina in radar.url_becas.split(";"):
+            r = lector.leer(pagina, forzar_navegador=radar.requiere_navegador)
+            if not r.ok:
+                res["nota"] += f" | {pagina} no respondió ({r.estado})"
+                continue
+            res["leida"] = True
+            res["paginas"].append(pagina)
+            for u, t in R.publicaciones(r.html, r.url, maximo * 2):
+                if u not in vistos and u not in conocidas:
+                    vistos.add(u)
+                    posts.append((u, t))
+        pendientes, abiertas = posts[:maximo], 0
+        while pendientes and abiertas < maximo * 2 and not DETENER.is_set():
+            post, _ = pendientes.pop(0)
+            abiertas += 1
+            res["sin_cambios"].append(post)  # la publicación queda anotada: no se vuelve a abrir en otra búsqueda
+            r = lector.leer(post, forzar_navegador=radar.requiere_navegador)
+            if not r.ok:
+                continue
+            externos, internos = R.enlaces_oficiales(r.html, r.url)
+            for u, t in externos:
+                if u not in conocidas:
+                    objetivos.setdefault(u, (t, None, f"{post} (encontrada en {radar.nombre}; se registra la página oficial)"))
+            for u, t in internos:  # resúmenes («30 becas abiertas»): sus enlaces llevan a otras publicaciones del agregador
+                if u not in vistos and u not in conocidas:
+                    vistos.add(u)
+                    pendientes.append((u, t))
+    por_fuente = {}
+    for url, (nombre, html, origen) in objetivos.items():
+        f = R.fuente_para(url, cfg.fuentes)
+        por_fuente.setdefault(f.id, (f, []))[1].append((url, nombre, html, origen))
+    for f, lista in por_fuente.values():
+        if DETENER.is_set():
+            break
+        sub = revisar_fuente(f, cfg, args, icetex, duplicados, conocidas, completa=False, seguir=lista, solo_seguir=True)
+        res["analizadas"] += sub["analizadas"]
+        res["hallazgos"].extend(sub["hallazgos"])
+    res["nota"] = (res["nota"].strip(" |") + f" | {len(objetivos)} páginas oficiales en {len(por_fuente)} sitios").strip(" |")
+    return res
+
+
+def fuentes_sugeridas(pool):
+    """Sitios oficiales que no están entre las fuentes y aportaron convocatorias en el descubrimiento."""
+    sug = {}
+    for f in pool:
+        fid = str(f.get("[Sistema] Fuente ID", ""))
+        if not fid.startswith("RAD-") or f.get("[Sistema] Resultado") == "Descartada al leerla":
+            continue
+        s = sug.setdefault(fid, {"Oferente": f.get("Nombre de la Fuente") or fid[4:], "Dominio oficial": "https://" + fid[4:],
+                                 "Tipo de actor": "Por clasificar", "País": "", "Actor en el catálogo": "",
+                                 "Oficial / No Oficial": f.get("Oficial / No Oficial", ""), "_n": 0, "_b": 0, "_c": []})
+        s["_n"] += 1
+        s["_b"] += f.get("[Sistema] Resultado") == "Enviada a la bandeja"
+        s["_c"].append(str(f.get("Nombre de la Convocatoria", ""))[:90])
+    salida = []
+    for s in sorted(sug.values(), key=lambda s: (-s["_b"], -s["_n"])):
+        salida.append({k: v for k, v in s.items() if not k.startswith("_")} | {
+            "Llegaron a la bandeja": s["_b"], "Candidatas": s["_n"], "Convocatorias encontradas": "; ".join(s["_c"][:5])})
+    return salida
 
 
 def mapear(cfg, args):
@@ -300,13 +468,22 @@ def mapear(cfg, args):
     import os
     historial = Historial(os.environ.get("MAPEO_HISTORIAL") or RAIZ / "datos" / "historial.json")
 
-    fuentes = fuentes_a_revisar(cfg, args)
+    descubrir = getattr(args, "modo", "") == "descubrir"
+    fuentes = [] if descubrir else fuentes_a_revisar(cfg, args)
+    radares = [r for r in cfg.radar if r.activa] if descubrir else []
+    if descubrir and not radares:
+        log.warning("No hay agregadores ni portales activos en la hoja «Radar» de la configuración.")
     conocidas = frozenset(historial.conocidas())
     cada = int(cfg.p("Días entre revisiones completas", 30) or 30)
     completa = {f.id: bool(getattr(args, "completo", False)) or (d := historial.dias_desde_completa(f.id, hoy.isoformat())) is None
                 or d >= cada for f in fuentes}
     n_rapidas = sum(1 for v in completa.values() if not v)
-    log.info("Revisando %d fuentes (becas, subvenciones, cooperación técnica y premios)…", len(fuentes))
+    if descubrir:
+        log.info("Descubriendo convocatorias fuera de las fuentes en %d sitios de radar (%s). Solo se registran las "
+                 "páginas oficiales de los oferentes, nunca las del agregador.", len(radares),
+                 ", ".join(r.nombre for r in radares))
+    else:
+        log.info("Revisando %d fuentes (becas, subvenciones, cooperación técnica y premios)…", len(fuentes))
     if n_rapidas:
         log.info("Modo rápido en %d fuentes: solo se abren las convocatorias nuevas. Las demás %d tienen revisión completa "
                  "(cada %d días).", n_rapidas, len(fuentes) - n_rapidas, cada)
@@ -321,7 +498,9 @@ def mapear(cfg, args):
     maximo_nuevas = meta
     externo.reiniciar_corrida()
     CONTEO.update(bandeja=0, por_completar=0, duplicadas=0)
-    if not getattr(args, "sin_bandeja", False) and usar_gemini:
+    if descubrir:
+        pass  # el descubrimiento usa todo el cupo de Gemini en lo nuevo
+    elif not getattr(args, "sin_bandeja", False) and usar_gemini:
         # primero, unas pocas de las que quedaron pendientes (y se limpia la bandeja de duplicados e incompletas)
         completar_pendientes(cfg, args, hoy, maximo=max(5, maximo_nuevas // 4))
     elif not getattr(args, "sin_bandeja", False):
@@ -330,18 +509,38 @@ def mapear(cfg, args):
         log.info("Sin Gemini en esta corrida: solo pasan las convocatorias que ya están en español y completas en su página; "
                  "las demás se vuelven a considerar en la próxima búsqueda con Gemini.")
 
+    # 1b. seguimiento de ediciones: convocatorias de la base ya cerradas cuya página se vuelve a abrir (año tras año)
+    seguir = {}
+    n_seg = int(cfg.p("Ediciones anteriores a revisar por búsqueda", 40) or 0)
+    registros_base = df_air.fillna("").to_dict("records") if df_air is not None else []
+    if not descubrir and registros_base and n_seg > 0 and not getattr(args, "fuente", None) and not getattr(args, "grupo", None):
+        seguir = ediciones_a_seguir(registros_base, fuentes, historial, hoy, n_seg, cada)
+        total = sum(len(v[1]) for v in seguir.values())
+        if total:
+            log.info("Seguimiento de ediciones: se vuelven a abrir %d convocatorias de la base ya cerradas, para ver si "
+                     "publicaron una nueva edición (las más cercanas al aniversario de su cierre primero).", total)
+    extra = [f for f, _ in seguir.values() if f not in fuentes] + radares
+
     # 1. recorrer las fuentes y reunir candidatas (todavía no se guarda nada en la bandeja)
     filas, descartadas, resumen, leidas, vistas, pool = [], [], [], set(), set(), []
     enviadas_total = hechas = 0
-    for fuente, res in en_paralelo(cfg, args, fuentes, lambda f: revisar_fuente(f, cfg, args, icetex, duplicados,
-                                                                                   conocidas, completa[f.id])):
+    todas = fuentes + extra
+    seg_tot = [0, 0]
+    def tarea(f):
+        if f in radares:
+            return revisar_radar(f, cfg, args, icetex, duplicados, conocidas)
+        return revisar_fuente(f, cfg, args, icetex, duplicados, conocidas, completa.get(f.id, False),
+                              seguir.get(f.id, (f, []))[1])
+    for fuente, res in en_paralelo(cfg, args, todas, tarea):
         hechas += 1
+        for url in res.get("seguidas", []):
+            historial.marcar_seguida(url, hoy.isoformat())
         for url in res["sin_cambios"]:
             historial.marcar_visto(url, fuente.id, hoy.isoformat())
-        if res["completa"] and res["leida"]:
+        if res["completa"] and res["leida"] and fuente in fuentes:
             historial.marcar_completa(fuente.id, hoy.isoformat())
         revision = desc = 0
-        if res["leida"]:
+        if res["leida"] and fuente in fuentes:  # las provisionales del seguimiento no cuentan para «ya no aparecen»
             leidas.add(fuente.id)
         for tipo, url, fila, motivo in res["hallazgos"]:
             if url in vistas:  # la misma convocatoria publicada en dos fuentes
@@ -360,15 +559,28 @@ def mapear(cfg, args):
                 historial.registrar(url, fuente.id, fila, hoy.isoformat())
                 continue
             fila["[Sistema] Estado"] = estado
-            fila["_url"], fila["_enlace"], fila["_fuente"] = url, enlace, fuente.id
+            fila["_url"], fila["_enlace"] = url, enlace
+            fila["_fuente"] = fila.get("[Sistema] Fuente ID") or fuente.id  # en el radar, el sitio oficial (no el agregador)
             fila["[Sistema] Resultado"] = "Para la próxima búsqueda (no alcanzó el cupo de esta)"
             pool.append(fila)
             revision += 1
         historial.guardar()
         _avisar("historial", historial.ruta)
         resumen.append((fuente.id, fuente.nombre, fuente.tipo, len(res["paginas"]), res["analizadas"], revision, desc, res["nota"]))
+        if fuente not in fuentes and fuente not in radares:  # abierto solo por el seguimiento de ediciones: se resume al final
+            seg_tot[0] += res["analizadas"]
+            seg_tot[1] += revision
+            continue
         log.info("%-10s páginas %d · abiertas %d · ya conocidas %d · candidatas %d · descartadas %d   [%d de %d]", fuente.id,
-                 len(res["paginas"]), res["analizadas"], len(res["sin_cambios"]), revision, desc, hechas, len(fuentes))
+                 len(res["paginas"]), res["analizadas"], len(res["sin_cambios"]), revision, desc, hechas, len(todas))
+
+    if seguir:
+        urls_seg = {u for _, lista in seguir.values() for u, _ in lista}
+        nuevas_ed = [f for f in pool if f["_url"] in urls_seg]
+        for f in nuevas_ed:
+            f["[Sistema] Estado"] = "Nueva edición (seguimiento)"
+        log.info("Seguimiento de ediciones: %d revisadas; %d publicaron una edición nueva o cambiaron y pasan a completarse "
+                 "(las demás siguen cerradas y se vuelven a mirar en 30 días).", len(urls_seg), len(nuevas_ed))
 
     # 2. elegir las mejores candidatas: no hace falta traer cientos; mejor pocas y completas
     # la misma convocatoria publicada en varios idiomas en el mismo sitio: se deja una (en español si la hay)
@@ -390,7 +602,7 @@ def mapear(cfg, args):
              "primero), hasta que %d lleguen completas a la bandeja.", len(unicas), meta)
 
     # 3. completar (traducir con Gemini) y guardar solo lo que quede completo, hasta llegar a la meta
-    consultas, motivo_fin = 0, ""
+    consultas, motivo_fin, no_conv = 0, "", {}
     for k, fila in enumerate(elegidas, 1):
         if DETENER.is_set():
             log.warning("Detenido: lo completado hasta aquí ya quedó guardado.")
@@ -407,6 +619,9 @@ def mapear(cfg, args):
             motivo_fin = "Gemini dejó de responder: " + externo.SUSPENDIDO["motivo"][:160]
             break
         url, fuente_id = fila["_url"], fila["_fuente"]
+        if no_conv.get(fuente_id, 0) >= 3:  # esa fuente solo devuelve menús o páginas generales: no gastar más consultas
+            fila["[Sistema] Resultado"] = "Para la próxima búsqueda (su fuente devolvió páginas sin convocatoria)"
+            continue
         if not str(fila.get("_texto", "")).strip():  # un PDF u otra página sin texto legible: no se puede completar sola
             historial.registrar(url, fuente_id, fila, hoy.isoformat())
             fila["[Sistema] Resultado"] = "Descartada al leerla"
@@ -421,6 +636,12 @@ def mapear(cfg, args):
                 fila["[Sistema] Resultado"] = "Para la próxima búsqueda (Gemini no respondió)"
                 continue  # se avisa arriba en la siguiente vuelta
             v = fila.get("_veredicto") or {}
+            from calidad.reglas import fecha as _fecha
+            cierre = _fecha(fila.get("Fecha Límite de Aplicación", ""))
+            if cierre and cierre < hoy and not str(fila.get("¿La convocatoria es permanente?", "")).lower().startswith("s"):
+                v = v | {"estado": "cerrada", "motivo": v.get("motivo") or f"la fecha límite ({fila['Fecha Límite de Aplicación']}) ya pasó"}
+            if not v.get("es_convocatoria", True):
+                no_conv[fuente_id] = no_conv.get(fuente_id, 0) + 1
             motivo = ("No es una convocatoria: " if not v.get("es_convocatoria", True) else
                       "No elegible para Colombia: " if v.get("colombia") == "no elegible" else
                       "Convocatoria cerrada: " if v.get("estado") == "cerrada" else "")
@@ -430,8 +651,8 @@ def mapear(cfg, args):
                 descartadas.append((motivo + (v.get("motivo") or "según la lectura de Gemini"), fila["Nombre de la Convocatoria"],
                                     url, fuente_id))
                 log.info("  Descartada al leerla: %s · %s", fila["Nombre de la Convocatoria"][:60], motivo + v.get("motivo", "")[:120])
-                log.info("  Completando {%d de %d} · resultado: a la bandeja %d · por completar %d", k, len(elegidas),
-                         CONTEO["bandeja"], CONTEO["por_completar"])
+                log.info("  Completas {%d de %d} · consultas a Gemini %d · resultado: a la bandeja %d · por completar %d",
+                         min(CONTEO["bandeja"], meta), meta, consultas, CONTEO["bandeja"], CONTEO["por_completar"])
                 continue
         if not getattr(args, "sin_bandeja", False):
             # sin Gemini, lo incompleto no se guarda: se vuelve a considerar cuando Gemini pueda completarlo
@@ -466,8 +687,17 @@ def mapear(cfg, args):
     retiradas = historial.retiradas(leidas)
     carpeta = RAIZ / "salidas"
     carpeta.mkdir(exist_ok=True)
-    ruta = carpeta / f"revision_{hoy.isoformat()}.xlsx"
+    ruta = carpeta / f"{'descubrimiento' if descubrir else 'revision'}_{hoy.isoformat()}.xlsx"
     salidas.escribir_revision(ruta, filas, descartadas, resumen, retiradas)
+    if descubrir:
+        sug = fuentes_sugeridas(filas)
+        with pd.ExcelWriter(ruta, engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
+            pd.DataFrame(sug, columns=["Oferente", "Dominio oficial", "Oficial / No Oficial", "Llegaron a la bandeja",
+                                       "Candidatas", "Convocatorias encontradas", "Tipo de actor", "País",
+                                       "Actor en el catálogo"]).to_excel(w, sheet_name="Fuentes sugeridas", index=False)
+        if sug:
+            log.info("Fuentes sugeridas: %d sitios oficiales que no están entre las fuentes aportaron convocatorias "
+                     "(el administrador puede agregarlos desde la página de búsqueda).", len(sug))
     historial.guardar()
     log.info("Listo: %d candidatas encontradas, %d descartadas por las reglas, %d ya no aparecen en su sitio.", len(filas),
              len(descartadas), len(retiradas))
@@ -514,6 +744,13 @@ def _datos_de(cfg, fila):
 CONTEO = {"bandeja": 0, "por_completar": 0, "duplicadas": 0}
 
 
+_ADMINISTRATIVAS = ("tuition", "fees", "cost calculator", "calculadora", "student employment", "empleo estudiantil",
+                    "returning students", "current students", "financial aid materials", "consumer", "disclosure", "policy",
+                    "política", "politica", "matrícula", "matricula", "tarifas", "how to pay", "refund", "faq",
+                    "preguntas frecuentes", "contact", "contacto", "news", "noticias", "events", "eventos", "terms and conditions",
+                    "términos y condiciones", "privacy", "privacidad", "login", "apply now", "admissions")
+
+
 def prioridad(fila, hoy):
     """Qué candidatas completar primero: abiertas con fecha próxima, elegibles y con página rica en información."""
     from calidad.reglas import fecha as a_fecha
@@ -527,6 +764,9 @@ def prioridad(fila, hoy):
     elif str(fila.get("¿La convocatoria es permanente?", "")).lower().startswith("s"):
         p += 1.5
     from motor.extraer import nucleo
+    titulo = str(fila.get("Nombre de la Convocatoria", "")).lower()
+    if any(w in titulo for w in _ADMINISTRATIVAS):
+        p -= 6  # matrícula, costos, empleo estudiantil, políticas, formularios: casi nunca son convocatorias
     propias = nucleo(fila.get("Nombre de la Convocatoria", "").split(" (")[0])
     if not propias:
         p -= 5  # «Call for Proposals», «Grants Calls», «Becas»: casi siempre una página de listado, no una convocatoria
@@ -742,7 +982,7 @@ def buscar_externo(cfg, args):
     return ruta
 
 
-def agregar_fuentes(ruta_config, sugeridas):
+def agregar_fuentes(ruta_config, sugeridas, origen="Búsqueda externa (Gemini)"):
     """Agrega sitios sugeridos como fuentes nuevas (activas) en la configuración."""
     from openpyxl import load_workbook
     from calidad.actores import caracter_de
@@ -757,11 +997,11 @@ def agregar_fuentes(ruta_config, sugeridas):
         n += 1
         tipo = s.get("Tipo de actor", "Por clasificar")
         valores = {"ID": f"EXT-{n:03d}", "Activa": "Sí", "Tipo de fuente": tipo, "Nombre": s.get("Actor en el catálogo") or s["Oferente"],
-                   "País": s.get("País", ""), "Dominio oficial": s["Dominio oficial"], "Oficial / No Oficial": caracter_de(tipo) or "No Oficial",
+                   "País": s.get("País", ""), "Dominio oficial": s["Dominio oficial"], "Oficial / No Oficial": caracter_de(tipo) or s.get("Oficial / No Oficial") or "No Oficial",
                    "Requiere navegador": "No", "Estado de validación": "Por validar", "Modalidades a buscar": "Todas",
                    "Grupo": grupos.get(tipo, "Fundaciones, ONG y empresas"), "Actor en el catálogo": s.get("Actor en el catálogo", ""),
-                   "Origen": "Búsqueda externa (Gemini)", "Verificación del dominio": "Sugerida por la búsqueda externa: validar",
-                   "Notas": "Convocatorias encontradas: " + s.get("Convocatorias encontradas", "")}
+                   "Origen": origen, "Verificación del dominio": "Sugerida por " + origen.lower() + ": validar",
+                   "Notas": "Convocatorias encontradas: " + str(s.get("Convocatorias encontradas", ""))}
         fila = ws.max_row + 1
         for k, v in valores.items():
             if k in cab:
@@ -902,7 +1142,7 @@ def externo_reiniciar():
 
 
 # ---------------------------------------------------------------------------
-VERSION = "2026-11-20"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
+VERSION = "2026-11-22"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
 
 
 class _Argumentos(argparse.ArgumentParser):
@@ -914,7 +1154,7 @@ class _Argumentos(argparse.ArgumentParser):
 
 def main(argv=None):
     p = _Argumentos(description="Mapeo de convocatorias internacionales para Colombia")
-    p.add_argument("comando", choices=["migrar", "importar", "publicar-base", "crear-usuario", "restablecer-clave", "generar-clave-cuentas", "validar-fuentes", "mapear", "buscar-externo", "completar-pendientes", "informe", "auditar"])
+    p.add_argument("comando", choices=["migrar", "importar", "publicar-base", "crear-usuario", "restablecer-clave", "generar-clave-cuentas", "validar-fuentes", "mapear", "descubrir", "buscar-externo", "completar-pendientes", "informe", "auditar"])
     p.add_argument("archivo", nargs="?", help="Export CSV (para migrar, auditar o informe desde un archivo)")
     p.add_argument("--config", default=str(cfgmod.RUTA_CONFIG))
     p.add_argument("--csv", default=str(RAIZ / "datos" / "airtable_actual.csv"))
@@ -945,7 +1185,9 @@ def main(argv=None):
     args.hoy = date.fromisoformat(args.hoy) if args.hoy else date.today()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     cfg = cfgmod.cargar(args.config)
-    return {"validar-fuentes": validar_fuentes, "mapear": mapear, "buscar-externo": buscar_externo,
+    if args.comando == "descubrir":
+        args.modo = "descubrir"
+    return {"validar-fuentes": validar_fuentes, "mapear": mapear, "descubrir": mapear, "buscar-externo": buscar_externo,
             "completar-pendientes": lambda c, a: (externo_reiniciar(), completar_pendientes(c, a))[1], "informe": informe, "auditar": auditar,
             "migrar": migrar, "importar": importar, "publicar-base": publicar_base, "crear-usuario": crear_usuario,
             "restablecer-clave": restablecer_clave, "generar-clave-cuentas": generar_clave_cuentas}[args.comando](cfg, args)

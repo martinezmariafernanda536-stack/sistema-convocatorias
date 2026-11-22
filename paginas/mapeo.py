@@ -93,12 +93,12 @@ def panel_ejecucion():
         with st.container(border=True):
             st.markdown(f"**{icono} {t.etiqueta}: {t.estado.lower()}** en {t.minutos()} min"
                         + (f" · {hechas} de {total} fuentes revisadas" if total else "")
-                        + (f" · **{enviadas} completas y en español** enviadas a revisión" if t.comando == "mapear" else "")
+                        + (f" · **{enviadas} completas y en español** enviadas a revisión" if t.comando in ("mapear", "descubrir") else "")
                         + (f" · {pend} quedaron por completar" if pend else "") + ".")
             corto = [l for l in t.lineas if "Llegaron " in l and " de las " in l]
             if corto:
                 st.warning(corto[-1].split(" ", 1)[1] if corto[-1][:2].isdigit() else corto[-1])
-            if t.comando == "mapear" and t.estado == "Terminada" and not enviadas:
+            if t.comando in ("mapear", "descubrir") and t.estado == "Terminada" and not enviadas:
                 st.caption("No llegó nada nuevo a la bandeja. Puede ser que no haya convocatorias nuevas, que todo lo encontrado "
                            "ya estuviera registrado, o que Gemini no haya respondido (usa **Probar Gemini**). El detalle "
                            "técnico lo dice.")
@@ -109,8 +109,29 @@ def panel_ejecucion():
                 st.caption("Alguien pulsó «Detener». Lo encontrado hasta ese momento ya está guardado.")
             with st.expander("Ver detalle técnico"):
                 st.code("\n".join(t.lineas[-40:]) or "(sin mensajes)", language=None)
-            if t.comando in ("mapear", "buscar-externo", "completar-pendientes"):
+            if t.comando in ("mapear", "descubrir", "buscar-externo", "completar-pendientes"):
                 st.page_link("paginas/bandeja.py", label="Revisar lo que encontró", icon=":material/fact_check:")
+
+
+def tabla_sugeridas(sug, clave, origen):
+    """Sitios oficiales nuevos: el administrador marca cuáles se agregan a la lista de fuentes."""
+    if YO["rol"] != "admin":
+        st.dataframe(sug, hide_index=True, width="stretch")
+        st.caption("El administrador decide si se agregan como fuentes.")
+        return
+    sug = sug.copy()
+    sug.insert(0, "Agregar", False)
+    editado = st.data_editor(sug, hide_index=True, width="stretch", key=clave,
+                             disabled=[c for c in sug.columns if c != "Agregar"])
+    elegidas = editado[editado["Agregar"]].drop(columns="Agregar").to_dict("records")
+    if st.button("Agregar los marcados como fuentes", disabled=not elegidas, key=clave + "_btn"):
+        import mapeo as programa
+        tmp = Path(tempfile.mkdtemp()) / CFG
+        tmp.write_bytes(config_bytes())
+        programa.agregar_fuentes(tmp, elegidas, origen=origen)
+        A.guardar_archivo(CFG, tmp.read_bytes())
+        st.success(f"{len(elegidas)} fuentes agregadas. Valídalas en Mantenimiento de fuentes.")
+        st.rerun()
 
 
 def revisar_version():
@@ -118,8 +139,11 @@ def revisar_version():
     faltan = []
     try:
         import mapeo as programa
-        if getattr(programa, "VERSION", "") < "2026-11-20":
+        if getattr(programa, "VERSION", "") < "2026-11-22":
             faltan.append("mapeo.py")
+        if importlib.util.find_spec("motor.radar") is None:
+            faltan.append("motor/radar.py")
+        import importlib.util
         from motor import extraer, externo
         if not hasattr(extraer, "secciones"):
             faltan.append("motor/extraer.py")
@@ -300,6 +324,49 @@ if ult and not OCUPADO:
         with b2.expander("Ver detalle técnico"):
             st.code("\n".join(r["log"]) or "(sin mensajes)")
 
+# --- descubrir convocatorias fuera de las fuentes ----------------------------------------
+try:
+    radar = pd.read_excel(tmp_cfg, sheet_name="Radar", dtype=str).fillna("")
+except Exception:  # noqa: BLE001 - configuración anterior, sin la hoja Radar
+    radar = pd.DataFrame(columns=["ID", "Activa", "Tipo", "Nombre"])
+radar_activo = radar[radar["Activa"].str.lower().isin(["sí", "si"])]
+with st.container(border=True):
+    st.markdown("#### Descubrir convocatorias fuera de las fuentes")
+    st.write("Búsqueda aparte para encontrar oferentes que **no están en la lista de fuentes**. Usa sitios que publican a "
+             "diario convocatorias de muchos oferentes **solo como radar**: el sistema sigue cada enlace hasta la **página "
+             "oficial** del oferente y registra únicamente esa; si no hay enlace oficial, la descarta. También consulta el "
+             "portal de financiación de la Unión Europea. Lo encontrado pasa por los mismos filtros (Gemini, Colombia "
+             "elegible, sin duplicados) y llega a la bandeja. Los sitios nuevos que aporten convocatorias quedan abajo como "
+             "**fuentes sugeridas**.")
+    if len(radar_activo):
+        st.caption("Sitios de radar activos: " + " · ".join(radar_activo["Nombre"]) +
+                   ". Se cambian en la hoja «Radar» de la configuración. Cada búsqueda abre solo publicaciones nuevas.")
+        if st.button("Descubrir convocatorias", disabled=OCUPADO, icon=":material/radar:",
+                     help="Usa la misma meta de convocatorias completas y el mismo cupo de Gemini que la búsqueda normal."):
+            ejecutar("descubrir", "Descubrimiento fuera de las fuentes",
+                     ["--paralelo", str(paralelo), "--pausa", str(pausa), "--maximo-nuevas", str(cupo)]
+                     + ([] if con_gemini else ["--sin-gemini"]))
+    else:
+        st.info("No hay sitios de radar activos. Actívalos en la hoja «Radar» de la configuración (solo administrador).")
+    rep_d = A.leer_archivo("ultimo_descubrimiento.xlsx")
+    reg_d = json.loads(A.leer_archivo("ultimo_descubrir.json") or b"{}")
+    if rep_d and not OCUPADO:
+        import io
+        hojas_d = pd.read_excel(io.BytesIO(rep_d), sheet_name=None, dtype=str)
+        listo = [l for l in reg_d.get("log", []) if "Listo:" in l]
+        st.markdown(f"**Último descubrimiento:** {reg_d.get('fecha', '')} · {reg_d.get('usuario', '')}"
+                    + (f"  \n{listo[-1].split('Listo:', 1)[1].strip()}" if listo else ""))
+        d1, d2 = st.columns([1, 2])
+        d1.download_button("Descargar reporte (Excel)", rep_d, f"descubrimiento_{reg_d.get('fecha', '')[:10]}.xlsx",
+                           icon=":material/download:", key="desc_rep")
+        with d2.expander("Ver detalle técnico"):
+            st.code("\n".join(reg_d.get("log", [])) or "(sin mensajes)")
+        sug_d = hojas_d.get("Fuentes sugeridas", pd.DataFrame()).fillna("")
+        if len(sug_d):
+            st.markdown(f"**Fuentes sugeridas ({len(sug_d)})**: sitios oficiales que no están en la lista y aportaron "
+                        "convocatorias. Al agregarlos, la búsqueda normal los revisa siempre.")
+            tabla_sugeridas(sug_d, "sug_radar", "Descubrimiento (radar)")
+
 # --- búsqueda fuera de las fuentes, con Gemini ---------------------------------------
 st.markdown("#### Buscar en otros sitios oficiales (con Gemini)")
 st.write("Úsala cuando necesites algo puntual, por ejemplo un tema o un país. Gemini busca en Google convocatorias en **sitios "
@@ -336,21 +403,7 @@ if ext:
         sug = hojas.get("Fuentes sugeridas", pd.DataFrame()).fillna("")
         if len(sug):
             st.markdown("**Sitios oficiales nuevos encontrados** (se pueden agregar a la lista de fuentes)")
-            if YO["rol"] == "admin":
-                sug.insert(0, "Agregar", False)
-                editado = st.data_editor(sug, hide_index=True, width="stretch", disabled=[c for c in sug.columns if c != "Agregar"])
-                elegidas = editado[editado["Agregar"]].drop(columns="Agregar").to_dict("records")
-                if st.button("Agregar los marcados como fuentes", disabled=not elegidas):
-                    import mapeo as programa
-                    tmp = Path(tempfile.mkdtemp()) / CFG
-                    tmp.write_bytes(config_bytes())
-                    programa.agregar_fuentes(tmp, elegidas)
-                    A.guardar_archivo(CFG, tmp.read_bytes())
-                    st.success(f"{len(elegidas)} fuentes agregadas. Valídalas en Mantenimiento de fuentes.")
-                    st.rerun()
-            else:
-                st.dataframe(sug, hide_index=True, width="stretch")
-                st.caption("El administrador decide si se agregan como fuentes.")
+            tabla_sugeridas(sug, "sug_gemini", "Búsqueda externa (Gemini)")
         if st.toggle("Ver detalle técnico", key="det_gemini"):
             st.code("\n".join(reg.get("log", [])) or "(sin mensajes)")
 

@@ -111,3 +111,23 @@ def test_clave_invalida_no_se_repite_en_cada_convocatoria(monkeypatch):
         with pytest.raises(externo.ErrorGemini):
             externo.llamar("hola", "clave", "gemini-3.8-flash", buscar_en_google=False)
     assert len(llamadas) == 1
+
+
+def test_alineacion_y_fechas_coherentes():
+    """Gemini elige la alineación en los catálogos oficiales; una permanente no conserva una fecha vencida."""
+    from datetime import date
+    from motor import config as C
+    from calidad.reglas import CATALOGOS
+    cfg = C.cargar()
+    fila = {"Nombre de la Convocatoria": "Democracia y Gobernanza", "Modalidad": "Subvención", "Descripción": "",
+            "Objetivos General y Específicos": "", "¿La convocatoria es permanente?": "Si",
+            "Fecha Límite de Aplicación": "1/3/2024", "Observaciones a la fecha límite de aplicación": "Applications are reviewed monthly.",
+            "Áreas temáticas de interés": "Democracia y Gobernanza", "[Sistema] Evidencia de Gemini en la página": ""}
+    c = {"linea_enci": CATALOGOS["Linea Prioritaria ENCI"][0], "metas_pnd": CATALOGOS["Metas PND"][1],
+         "cad": "No es un valor del catálogo", "ods": CATALOGOS["ODS"][15]}
+    externo.completar(fila, c, CATALOGOS, cfg, "texto", "Subvención", date(2026, 11, 21))
+    assert fila["Linea Prioritaria ENCI"] == CATALOGOS["Linea Prioritaria ENCI"][0]
+    assert fila["Metas PND"] == CATALOGOS["Metas PND"][1]
+    assert not fila.get("Comite de Ayuda al Desarrollo")            # un valor fuera del catálogo no entra
+    assert fila["Fecha Límite de Aplicación"] == ""                  # permanente: no conserva la fecha vencida
+    assert fila["Observaciones a la fecha límite de aplicación"].startswith("Ver las condiciones")

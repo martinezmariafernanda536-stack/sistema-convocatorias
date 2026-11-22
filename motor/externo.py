@@ -131,7 +131,11 @@ def _pedir(cuerpo, clave, modelo, espera, buscar_en_google):
         SUSPENDIDO["motivo"] = ("Gemini respondió 429: se agotó el cupo gratuito de hoy en todos los modelos ("
                                 + ", ".join(sorted(_AGOTADOS)) + "). Se reinicia a medianoche, hora del Pacífico.")
         raise ErrorGemini(SUSPENDIDO["motivo"])
-    raise ErrorGemini("Gemini no respondió: " + "; ".join(errores[-4:]))
+    detalle = "; ".join(errores[-4:]) or "ningún modelo devolvió una respuesta útil"
+    if buscar_en_google:
+        detalle += (" — la búsqueda en Google de Gemini no está incluida en el plan gratuito de los modelos actuales; "
+                    "requiere facturación activa en Google AI Studio")
+    raise ErrorGemini("Gemini no respondió: " + detalle)
 
 
 
@@ -392,6 +396,26 @@ def completar(fila, c, catalogos, cfg, texto_norm, modalidad, hoy=None):
         for campo, valor in reglas.alineacion(temas_actuales, cfg, modalidad).items():
             if not fila.get(campo):
                 fila[campo] = valor
+    # alineación elegida por Gemini en los catálogos oficiales, para lo que la tabla de temáticas no cubre
+    for clave, campo in [('linea_enci', 'Linea Prioritaria ENCI'), ('plan_marco', 'Plan Marco de Implementación'), ('sector_gobierno', 'Sector Gobierno'), ('ods', 'ODS'), ('metas_pnd', 'Metas PND'), ('cad', 'Comite de Ayuda al Desarrollo')]:
+        valor = str(c.get(clave) or "").strip()
+        if valor and not fila.get(campo) and valor in catalogos.get(campo, []):
+            poner(campo, valor)
+    # fechas coherentes: una permanente no lleva fecha límite; con fecha límite futura no es permanente
+    perm = str(fila.get("¿La convocatoria es permanente?", "")).lower().startswith("s")
+    limite = str(fila.get("Fecha Límite de Aplicación", "")).strip()
+    if perm and limite:
+        try:
+            d = datetime.strptime(limite, "%d/%m/%Y").date()
+        except ValueError:
+            d = None
+        if d and hoy and d >= hoy:
+            fila["¿La convocatoria es permanente?"] = "No"
+        else:
+            fila["Fecha Límite de Aplicación"] = ""
+    obs = fila.get("Observaciones a la fecha límite de aplicación", "")
+    if obs and not en_espanol(obs):
+        fila["Observaciones a la fecha límite de aplicación"] = "Ver las condiciones de la fecha en la página oficial."
     amb = _lista(c.get("ambito_geografico"), catalogos.get("Ámbito Geográfico", []), 1)
     if amb and amb[0] != fila.get("Ámbito Geográfico"):
         poner("Ámbito Geográfico", amb[0])
@@ -531,6 +555,13 @@ Devuelve SOLO un objeto JSON con estos campos (los de lista deben usar exactamen
     Beca: {json.dumps(PLANT["Beca"], ensure_ascii=False)}
     Premio: {json.dumps(PLANT["Premio"], ensure_ascii=False)}
     Cooperación técnica: {json.dumps(PLANT["Cooperación Técnica"], ensure_ascii=False)}
+- Alineación (UN valor de cada lista, el más relacionado con lo que financia o busca la convocatoria; "" si ninguno aplica):
+  "linea_enci" de: {lista("Linea Prioritaria ENCI")}
+  "plan_marco" de: {lista("Plan Marco de Implementación")}
+  "sector_gobierno" de: {lista("Sector Gobierno")}
+  "ods" de: {lista("ODS")}
+  "metas_pnd" de: {lista("Metas PND")}
+  "cad" de: {lista("Comite de Ayuda al Desarrollo")}
 - "dirigida_a": lista con valores de: {lista("Dirigida a (tipo de publico)")}
 - "poblaciones": lista con valores de: {lista("Esta convocatoria prioriza alguna de las siguientes poblaciones?")}
 - "tematicas": hasta 3 valores de: {lista("Áreas temáticas de interés")}
