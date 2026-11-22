@@ -33,6 +33,8 @@ def limpio(monkeypatch):
     monkeypatch.delenv("MAPEO_GEMINI_PRUEBA_COMPLETAR", raising=False)
     externo._REEMPLAZO.clear()
     externo.reiniciar_corrida()
+    monkeypatch.setitem(externo._RITMO, "pausa", 0)
+    monkeypatch.setattr(externo.time if hasattr(externo, "time") else __import__("time"), "sleep", lambda s: None)
     yield
     externo._REEMPLAZO.clear()
     externo.reiniciar_corrida()
@@ -40,16 +42,62 @@ def limpio(monkeypatch):
 
 def test_reintenta_con_el_modelo_nuevo(monkeypatch):
     usados = []
+    msg = MSG.replace("gemini-2.5-flash", "gemini-9-viejo").replace("gemini-3.8-flash", "gemini-9-nuevo")
 
     def post(url, **kw):
         usados.append(url.split("/models/")[1].split(":")[0])
-        if "2.5" in url:
-            return Resp(404, {"error": {"message": MSG}})
+        if "viejo" in url:
+            return Resp(404, {"error": {"message": msg}})
         return Resp(200, {"candidates": [{"content": {"parts": [{"text": "{}"}]}}]})
     monkeypatch.setattr(externo.requests, "post", post)
-    externo.llamar("hola", "clave", "gemini-2.5-flash", buscar_en_google=False)
-    externo.llamar("hola", "clave", "gemini-2.5-flash", buscar_en_google=False)
-    assert usados == ["gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.8-flash"]  # el segundo ya va directo
+    externo.llamar("hola", "clave", "gemini-9-viejo", buscar_en_google=False)
+    externo.llamar("hola", "clave", "gemini-9-viejo", buscar_en_google=False)
+    assert usados == ["gemini-9-viejo", "gemini-9-nuevo", "gemini-9-nuevo"]  # el segundo ya va directo
+
+
+def test_modelos_de_cupo_bajo_van_al_final():
+    assert externo.cadena("gemini-2.5-flash")[0] == "gemini-3.5-flash-lite"
+    assert externo.cadena("gemini-3.8-flash")[-1] == "gemini-3.8-flash"
+    assert externo.cadena("gemini-3.1-flash-lite")[0] == "gemini-3.1-flash-lite"
+
+
+def test_saturado_reintenta_y_cambia_de_modelo(monkeypatch):
+    usados = []
+
+    def post(url, **kw):
+        m = url.split("/models/")[1].split(":")[0]
+        usados.append(m)
+        if m == "gemini-3.5-flash-lite":
+            return Resp(503, {"error": {"message": "This model is currently experiencing high demand."}})
+        return Resp(200, {"candidates": [{"content": {"parts": [{"text": "{}"}]}}]})
+    monkeypatch.setattr(externo.requests, "post", post)
+    externo.llamar("hola", "clave", "gemini-3.5-flash-lite", buscar_en_google=False)
+    assert usados == ["gemini-3.5-flash-lite"] * 3 + ["gemini-3.1-flash-lite"]
+
+
+def test_cupo_diario_agotado_sigue_con_otro_y_al_final_suspende(monkeypatch):
+    usados = []
+    diario = {"error": {"message": "Quota exceeded for metric: generate_content_free_tier_requests, limit: 20. "
+                                   "Generate content requests per day limit exceeded on Free Tier."}}
+
+    def post(url, **kw):
+        usados.append(url.split("/models/")[1].split(":")[0])
+        return Resp(429, diario)
+    monkeypatch.setattr(externo.requests, "post", post)
+    with pytest.raises(externo.ErrorGemini):
+        externo.llamar("hola", "clave", "gemini-3.5-flash-lite", buscar_en_google=False)
+    assert usados == ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash"]  # una vez cada uno
+    assert "cupo gratuito de hoy" in externo.SUSPENDIDO["motivo"]
+
+
+def test_lo_mismo_en_otro_idioma_y_listados():
+    from motor import extraer
+    assert extraer.nucleo("Le programme de bourses France Excellence Eiffel") == extraer.nucleo("France Excellence Eiffel scholarship program") \
+        == extraer.nucleo("El programa de becas France Excellence Eiffel")
+    assert extraer.nucleo("Call for Proposals") == frozenset() and extraer.nucleo("Grants Calls 2027") == frozenset()
+    assert extraer.es_enlace_de_idioma("Français") and extraer.es_enlace_de_idioma("EN | ES") and not extraer.es_enlace_de_idioma("Eiffel")
+    html = '<html><head><link rel="alternate" hreflang="es" href="/es/becas/eiffel"></head></html>'
+    assert extraer.version_en_espanol(html, "https://www.campusfrance.org/en/eiffel") == "https://www.campusfrance.org/es/becas/eiffel"
 
 
 def test_clave_invalida_no_se_repite_en_cada_convocatoria(monkeypatch):

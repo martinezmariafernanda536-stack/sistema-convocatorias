@@ -181,7 +181,7 @@ def test_con_gemini_llegan_traducidas_y_completas(entorno, tmp_path, monkeypatch
 
 
 def test_cupo_de_nuevas_por_busqueda(entorno, tmp_path, monkeypatch):
-    """Se completan solo las N candidatas más prometedoras; las demás quedan para la próxima búsqueda (no se pierden)."""
+    """La búsqueda se detiene al llegar a la meta de convocatorias completas; las demás quedan para la próxima."""
     from bandeja.almacen import AlmacenSQLite
     monkeypatch.setenv("MAPEO_GEMINI_PRUEBA_COMPLETAR", str(RAIZ / "pruebas" / "gemini_completar.json"))
     ruta = correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY, "--maximo-nuevas", "1")
@@ -194,7 +194,9 @@ def test_cupo_de_nuevas_por_busqueda(entorno, tmp_path, monkeypatch):
     # en la siguiente búsqueda vuelven a estar disponibles
     rev2 = pd.read_excel(correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY, "--maximo-nuevas", "1"),
                          sheet_name="Revisión", dtype=str).fillna("")
-    assert len(rev2) == len(rev) - 1
+    pendientes = {u for u in rev[rev["[Sistema] Resultado"].str.startswith("Para la próxima")]["Cómo aplicar"]
+                  if not u.endswith(".pdf")}  # un PDF sin texto se descarta al leerlo
+    assert pendientes and pendientes <= set(rev2["Cómo aplicar"])  # las que no alcanzaron vuelven
 
 
 def test_gemini_descarta_lo_que_no_es_convocatoria(entorno, tmp_path, monkeypatch):
@@ -465,3 +467,28 @@ def test_pagina_con_varias_becas_se_separa_una_por_una():
     # el enlace a otra página de beca también se sigue; esa exige nacionalidad mexicana
     tipo, _, motivo = por_url["https://tec.mx/es/profesional/becas/beca-lideres-del-manana"]
     assert tipo == "descartada" and "mexicana" in motivo.lower()
+
+
+def test_meta_de_completas_sigue_hasta_cumplirla(entorno, tmp_path, monkeypatch):
+    """Si algunas candidatas no sirven, la búsqueda sigue con las siguientes hasta llegar a la meta."""
+    import json as _json
+    from motor import externo as EX
+    from bandeja.almacen import AlmacenSQLite
+    base = _json.load(open(RAIZ / "pruebas" / "gemini_completar.json"))
+    contador = {"n": 0}
+    original = EX.llamar
+
+    def llamar(prompt, clave, modelo, espera=None, buscar_en_google=True):
+        contador["n"] += 1
+        t = _json.loads(base["candidates"][0]["content"]["parts"][0]["text"])
+        n = contador["n"]
+        if n % 2:  # una de cada dos «no es convocatoria»
+            t |= {"es_convocatoria": False, "motivo_descarte": "Es un listado general"}
+        t["nombre"] = f"Beca de prueba número {n} (Test scholarship {n})"
+        return _json.dumps(t, ensure_ascii=False), []
+    monkeypatch.setenv("MAPEO_GEMINI_PRUEBA_COMPLETAR", "si")
+    monkeypatch.setattr(EX, "llamar", llamar)
+    correr("mapear", "--config", str(entorno), "--prueba", str(PAGINAS), "--hoy", HOY, "--maximo-nuevas", "2")
+    a = AlmacenSQLite(tmp_path / "base.db")
+    # siguió después de la primera completa y de las que no servían, hasta agotar las candidatas o llegar a la meta
+    assert len(a.items("Por revisar")) >= 1 and contador["n"] >= 4

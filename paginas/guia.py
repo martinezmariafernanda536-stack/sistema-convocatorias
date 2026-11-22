@@ -35,9 +35,10 @@ with st.expander("🔎 Buscar convocatorias nuevas", expanded=True):
 1. En el menú, abre **Buscar convocatorias**.
 2. Pulsa **Buscar convocatorias nuevas**. No hace falta cambiar ninguna opción.
 3. La búsqueda corre en el servidor: puedes cerrar la pestaña o seguir trabajando. La barra muestra cuántas fuentes lleva.
-4. La búsqueda tiene dos pasos: primero recorre los sitios y reúne candidatas; luego elige las más prometedoras (hasta
-   40 por búsqueda, se puede cambiar) y Gemini las **traduce al español y las completa** leyendo su página. Solo llega a
-   **Revisar convocatorias** lo que quede completo. Las demás candidatas se consideran en la siguiente búsqueda.
+4. La búsqueda tiene dos pasos: primero recorre los sitios y reúne candidatas; luego, de la más prometedora a la menos,
+   Gemini las **traduce al español y las completa** leyendo su página, **hasta que 20 lleguen completas** a **Revisar
+   convocatorias** (la meta se puede cambiar en las opciones). Las candidatas que no alcanzaron se consideran en la siguiente
+   búsqueda. Si no hay 20 nuevas disponibles, el resultado dice por qué.
 5. Lo que ya está registrado este año (aunque tenga otro enlace o el nombre traducido) no vuelve a entrar.
 
 **Cada cuánto:** una vez por semana es suficiente. La primera vez tarda más, porque todavía no conoce ninguna convocatoria;

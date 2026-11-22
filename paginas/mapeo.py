@@ -77,8 +77,8 @@ def panel_ejecucion():
                 tareas.detener()
             hechas, total, enviadas, pend, k, n = progreso(t.lineas)
             if n:
-                st.progress(k / n, text=f"Fuentes revisadas. Traduciendo y completando con Gemini: {k} de {n} · "
-                                        f"{enviadas} completas enviadas a revisión")
+                st.progress(min(1.0, k / n), text=f"Paso 2 de 2 · Traduciendo y completando con Gemini · "
+                                                  f"{k} de {n} convocatorias completas en la bandeja")
             elif total:
                 st.progress(hechas / total, text=f"Paso 1 de 2 · {hechas} de {total} fuentes revisadas")
             else:
@@ -95,6 +95,9 @@ def panel_ejecucion():
                         + (f" · {hechas} de {total} fuentes revisadas" if total else "")
                         + (f" · **{enviadas} completas y en español** enviadas a revisión" if t.comando == "mapear" else "")
                         + (f" · {pend} quedaron por completar" if pend else "") + ".")
+            corto = [l for l in t.lineas if "Llegaron " in l and " de las " in l]
+            if corto:
+                st.warning(corto[-1].split(" ", 1)[1] if corto[-1][:2].isdigit() else corto[-1])
             if t.comando == "mapear" and t.estado == "Terminada" and not enviadas:
                 st.caption("No llegó nada nuevo a la bandeja. Puede ser que no haya convocatorias nuevas, que todo lo encontrado "
                            "ya estuviera registrado, o que Gemini no haya respondido (usa **Probar Gemini**). El detalle "
@@ -182,10 +185,10 @@ with opciones:
     completo = o2.toggle("Revisión completa", help="Vuelve a abrir también las convocatorias ya conocidas, para detectar cambios. "
                          "Tarda bastante más. Igual se hace sola en cada fuente cada 30 días.")
     o3, o4 = st.columns(2)
-    cupo = st.slider("Convocatorias nuevas por búsqueda", 10, 100, 40, 5,
-                     help="Cuántas convocatorias nuevas traducir y completar con Gemini en cada búsqueda. Se eligen las más "
-                          "prometedoras (abiertas, con fecha próxima y elegibles); las demás quedan para la siguiente. "
-                          "Menos = más rápido.")
+    cupo = st.slider("Convocatorias completas por búsqueda", 10, 60, 20, 5,
+                     help="La búsqueda sigue completando candidatas (de la más prometedora a la menos) hasta que esta "
+                          "cantidad llegue completa y en español a la bandeja. Tope de seguridad: 120 consultas a Gemini por "
+                          "búsqueda, para no agotar el cupo diario gratuito (unas 500 consultas al día).")
     paralelo = o3.slider("Sitios a la vez", 3, 12, 10, help="Más sitios a la vez = más rápido. Si la app se pone lenta, bájalo.")
     pausa = o4.slider("Segundos entre páginas del mismo sitio", 1.0, 5.0, 2.0, 0.5,
                       help="Pausa de cortesía para no saturar cada sitio. No se recomienda menos de 2.")
@@ -196,7 +199,7 @@ fallidas = sel["Estado de validación"].str.startswith(("Sitio no responde", "Bl
 n_sel = int((~fallidas).sum())
 primera_vez = not A.leer_archivo("historial_mapeo.json")
 completa_efectiva = completo or primera_vez
-minutos = max(1, round(n_sel * (1.6 if completa_efectiva else 0.35) * pausa / 2 / paralelo + (cupo * 9 / 60 if con_gemini else 0)))
+minutos = max(1, round(n_sel * (1.6 if completa_efectiva else 0.35) * pausa / 2 / paralelo + (cupo * 2.5 * 9 / 60 if con_gemini else 0)))
 extra = [] if set(elegidos) == set(grupos) else [x for g in elegidos for x in ("--grupo", g)]
 extra += ["--paralelo", str(paralelo), "--pausa", str(pausa)]
 extra_mapeo = (extra + ["--maximo-nuevas", str(cupo)] + (["--completo"] if completo else [])
@@ -205,8 +208,8 @@ extra_mapeo = (extra + ["--maximo-nuevas", str(cupo)] + (["--completo"] if compl
 with tarjeta:
     st.markdown("#### Buscar convocatorias nuevas")
     tiempo = f"unos {minutos} minutos" if minutos < 90 else f"cerca de {round(minutos / 60, 1)} horas"
-    st.write(f"Se revisarán **{n_sel} sitios oficiales** y se traerán hasta **{cupo} convocatorias nuevas, traducidas y "
-             f"completas** · tiempo estimado: **{tiempo}**"
+    st.write(f"Se revisarán **{n_sel} sitios oficiales** y la búsqueda seguirá hasta traer **{cupo} convocatorias nuevas, "
+             f"traducidas y completas** · tiempo estimado: **{tiempo}**"
              + (" (la primera vez tarda más; las siguientes solo abren lo nuevo)" if primera_vez else "") + ".")
     if not con_gemini:
         st.warning("Sin Gemini solo pasan las convocatorias que ya están en español y completas en su página. "

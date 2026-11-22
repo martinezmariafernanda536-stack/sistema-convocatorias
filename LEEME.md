@@ -233,7 +233,10 @@ Cada búsqueda tiene dos pasos:
 
 1. **Recorrer los sitios** y reunir candidatas (lo que ya se conoce no se vuelve a abrir).
 2. **Elegir y completar:** se ordenan las candidatas (abiertas y con fecha próxima, elegibles y con página rica en información
-   primero) y se toman hasta **40** (parámetro «Máximo de convocatorias nuevas por búsqueda» o el control de la pantalla).
+   primero) y se van completando **hasta que 20 lleguen completas a la bandeja** (parámetro «Convocatorias completas por
+   búsqueda» o el control de la pantalla), con un tope de seguridad de 120 consultas a Gemini por búsqueda («Máximo de
+   consultas a Gemini por búsqueda»). Si no se llega a la meta, el registro y la pantalla dicen por qué (no había más
+   candidatas nuevas, se agotó el cupo diario de Gemini, Gemini saturado…).
    Gemini lee la página de cada una, la **traduce al español y llena el formulario**, y dice si de verdad es una convocatoria,
    si Colombia puede postularse y si está abierta. Lo que no es convocatoria, no es elegible o ya cerró se descarta con el
    motivo; lo completo pasa a la bandeja.
@@ -394,7 +397,11 @@ Quedan para quien revisa las verificaciones, la priorización, el acompañamient
 
 Para activarla:
 1. Crear una clave en Google AI Studio y agregarla como secreto `GEMINI_API_KEY`.
-2. El modelo se elige en la hoja **Parametros → Modelo de Gemini**, o con el secreto `GEMINI_MODEL`. Por defecto es `gemini-3.8-flash` (gratuito en el plan gratuito de la API, dentro de sus límites). Si Google retira el modelo configurado, el sistema usa automáticamente el que Google sugiere en su respuesta y lo avisa en el registro. Ojo: en algunos modelos la búsqueda en Google de Gemini (paso 3, búsqueda externa) puede exigir facturación activa; el completado de campos del mapeo no busca en Google y no la necesita. En la página de Mapeo, el interruptor **Completar campos con Gemini** permite apagarlo en una corrida.
+2. El modelo se elige en la hoja **Parametros → Modelo de Gemini**, o con el secreto `GEMINI_MODEL`. Por defecto es `gemini-3.5-flash-lite`: en el plan gratuito permite unas **500 consultas al día** (Gemini 3.8 Flash solo
+20). El sistema prueba los modelos en cadena (`gemini-3.5-flash-lite` → `gemini-3.1-flash-lite` → `gemini-3.8-flash`): si
+uno está saturado (503) reintenta y pasa al siguiente; si uno agota su cupo del día (429) sigue con el siguiente; si todos lo
+agotan, lo que falta queda para la próxima búsqueda (el cupo se reinicia a medianoche, hora del Pacífico). Entre consultas
+espera 6,5 segundos para no pasar el límite por minuto. Si Google retira el modelo configurado, el sistema usa automáticamente el que Google sugiere en su respuesta y lo avisa en el registro. Ojo: en algunos modelos la búsqueda en Google de Gemini (paso 3, búsqueda externa) puede exigir facturación activa; el completado de campos del mapeo no busca en Google y no la necesita. En la página de Mapeo, el interruptor **Completar campos con Gemini** permite apagarlo en una corrida.
 
 Desde la terminal: `python mapeo.py buscar-externo --modalidad Subvención --tema "cambio climático"`.
 

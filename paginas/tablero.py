@@ -78,6 +78,12 @@ def texto(t):
     st.markdown(f"<div class='texto'>{t}</div>", unsafe_allow_html=True)
 
 
+def lectura(t):
+    """Análisis debajo de las gráficas: qué muestran las cifras y qué significan."""
+    if t:
+        texto(t)
+
+
 # ---------------------------------------------------------------------------
 st.title("Convocatorias internacionales")
 st.caption("Dirección de Gestión de Demanda de Cooperación Internacional · APC-Colombia")
@@ -125,121 +131,160 @@ if df.empty:
 
 ind = I.calcular(df, corte=df_todo["Registro"].max())
 n = ind.n
+MOD_COLOR = {"Beca": "#2a78d6", "Subvención": "#eb6834", "Premio": "#1a9e77", "Cooperación técnica": "#8a63d2"}
 
+
+def color_mod(k):
+    return MOD_COLOR.get(str(k).split(" (")[0], "#9aa4b1")
+
+
+# En pocas palabras: lo que cualquier persona debe saber, sin leer las gráficas
+st.markdown("<div style='background:#EEF3F9;border-left:5px solid #0B2545;border-radius:8px;padding:14px 18px;margin:4px 0 14px'>"
+            "<div style='font-weight:700;color:#0B2545;margin-bottom:6px'>Principales resultados</div>"
+            + "".join(f"<div style='margin:3px 0'>• {m}</div>" for m in ind.textos["mensajes"]) + "</div>",
+            unsafe_allow_html=True)
 k = st.columns(5)
 for col, (v, lab) in zip(k, [
     (I.fmt_n(ind.total), "convocatorias"),
-    (I.fmt_n(n["oficial"]), f"oficiales · {I.fmt_pct(I.pct(n['oficial'], ind.total))}"),
-    (I.fmt_n(n["no_oficial"]), f"no oficiales · {I.fmt_pct(I.pct(n['no_oficial'], ind.total))}"),
-    (I.fmt_n(n["actores"]), "actores distintos"),
-    (I.fmt_n(n["abiertas"]), f"abiertas al {ind.corte:%d/%m/%Y}"),
+    (I.fmt_n(n["abiertas"]), "abiertas hoy"),
+    (I.fmt_n(n["cierran_30"]), "cierran en 30 días"),
+    (I.fmt_pct(I.pct(n["oficial"], ind.total)), "son oferta oficial"),
+    (I.fmt_n(n["actores"]), "entidades oferentes"),
 ]):
     col.markdown(f"<div class='kpi'><div class='v'>{v}</div><div class='l'>{lab}</div></div>", unsafe_allow_html=True)
 st.write("")
 
-tabs = st.tabs(["Resumen", "Oficial", "No oficial", "Temáticas y tendencia", "Público, CAD y ODS", "Calidad del dato", "Datos", "Informe"])
+tabs = st.tabs(["Resumen", "Abiertas y cierres", "Quién ofrece", "Temas y público", "Calidad del dato", "Datos", "Informe"])
 
 with tabs[0]:
-    texto(ind.textos["resumen"])
-    a, b = st.columns(2)
+    a, b = st.columns([1, 1.25])
     with a:
-        st.subheader("Modalidad")
-        st.plotly_chart(barras_caracter(ind.por_caracter("Modalidad")), width="stretch")
+        st.subheader("¿Oficial o no oficial?")
+        fig = go.Figure(go.Pie(labels=["Oficial", "No oficial"], values=[n["oficial"], n["no_oficial"]], hole=0.62, sort=False,
+                               marker=dict(colors=[AZUL, NARANJA], line=dict(color="white", width=2)),
+                               texttemplate="%{percent:.0%}", textfont=dict(size=15, color="white"),
+                               hovertemplate="%{label}: %{value} convocatorias (%{percent})<extra></extra>"))
+        fig.add_annotation(text=f"<b>{I.fmt_n(ind.total)}</b><br>convocatorias", showarrow=False, font=dict(size=15, color=NAVY))
+        st.plotly_chart(estilo(fig, 300), width="stretch")
+        st.caption("Oficial: gobiernos, agencias de cooperación y organismos internacionales. "
+                   "No oficial: fundaciones, ONG, universidades y empresas.")
     with b:
-        st.subheader("Registro mensual")
-        pm = ind.por_mes()
-        fig = go.Figure()
-        for serie in I.CARACTER:
-            fig.add_scatter(x=[I.mes_corto(p) for p in pm.index], y=pm[serie], name=serie, mode="lines+markers",
-                            line=dict(color=COLOR[serie], width=2.5), marker=dict(size=8, line=dict(color="white", width=1.5)),
-                            hovertemplate="%{x}<br>" + serie + ": %{y}<extra></extra>")
-        if ind.corte < pm.index[-1].end_time.normalize():
-            fig.add_vrect(x0=len(pm) - 1.5, x1=len(pm) - 0.5, fillcolor="#f0efec", line_width=0, layer="below",
-                          annotation_text="mes en curso", annotation_position="top")
-        fig.update_layout(hovermode="x unified")
-        st.plotly_chart(estilo(fig, 380), width="stretch")
-    texto(ind.textos["tendencia"])
+        st.subheader("¿Qué tipo de convocatorias?")
+        mod = ind.conteo("Modalidad")
+        fig = go.Figure(go.Bar(y=[str(i).split(" (")[0] for i in mod.index][::-1], x=mod.values[::-1], orientation="h",
+                               marker_color=[color_mod(i) for i in mod.index][::-1],
+                               text=[f"{v} ({100 * v / ind.total:.0f} %)" for v in mod.values[::-1]], textposition="outside",
+                               cliponaxis=False, hovertemplate="%{y}: %{x}<extra></extra>"))
+        fig.update_xaxes(range=[0, max(1, mod.max()) * 1.3])
+        st.plotly_chart(estilo(fig, 300), width="stretch")
+    st.subheader("¿Cuántas se registran cada mes?")
+    pm = ind.por_mes()
+    fig = go.Figure()
+    for serie in I.CARACTER:
+        fig.add_bar(x=[I.mes_corto(p) for p in pm.index], y=pm[serie], name=serie.replace("No Oficial", "No oficial"),
+                    marker_color=COLOR[serie], hovertemplate="%{x}<br>" + serie + ": %{y}<extra></extra>")
+    if ind.corte < pm.index[-1].end_time.normalize():
+        fig.add_vrect(x0=len(pm) - 1.5, x1=len(pm) - 0.5, fillcolor="#f0efec", line_width=0, layer="below",
+                      annotation_text="mes en curso", annotation_position="top")
+    fig.update_layout(barmode="stack", hovermode="x unified")
+    st.plotly_chart(estilo(fig, 340), width="stretch")
+    lectura(ind.textos["lecturas"]["resumen"])
 
 with tabs[1]:
-    texto(ind.textos["oficial"])
-    of = df[df["Carácter"] == "Oficial"]
-    if len(of):
-        a, b = st.columns([1, 1.3])
-        with a:
-            st.subheader("Por tipo de actor")
-            st.plotly_chart(barras_simples(of["Tipo de actor"].value_counts(), AZUL, total=len(of)), width="stretch")
-        with b:
-            st.subheader("Agencias y actores con más convocatorias")
-            top = ind.actores("Oficial", 15)
-            st.plotly_chart(barras_simples(top.set_index("Actor")["Convocatorias"], AZUL,
-                                           dict(zip(top["Actor"], top["Tipo de actor"].str.split(" /").str[0])), actores=True),
-                            width="stretch")
-        st.subheader("Temáticas de la oferta oficial")
-        st.plotly_chart(barras_simples(ind.conteo("Áreas temáticas de interés", sub=of, multi=True, top=10), AZUL, total=len(of)),
-                        width="stretch")
+    st.subheader("¿Cuándo cierran las convocatorias abiertas?")
+    cm = ind.cierres_por_mes(6)
+    if cm.empty or not cm.values.sum():
+        st.info("No hay convocatorias abiertas con fecha límite en los filtros seleccionados.")
+    else:
+        fig = go.Figure()
+        for col in cm.columns:
+            fig.add_bar(x=[I.mes_corto(p) for p in cm.index], y=cm[col], name=str(col).split(" (")[0], marker_color=color_mod(col),
+                        hovertemplate="%{x}<br>" + str(col).split(" (")[0] + ": %{y}<extra></extra>")
+        fig.update_layout(barmode="stack", hovermode="x unified", showlegend=True)
+        st.plotly_chart(estilo(fig, 270), width="stretch")
+        st.caption(f"Convocatorias abiertas hoy ({ind.hoy:%d/%m/%Y}) según el mes de su fecha límite. "
+                   "Las permanentes no aparecen porque no tienen fecha límite.")
+    prox = ind.proximas(None)
+    if len(prox):
+        st.subheader(f"Las {len(prox)} convocatorias abiertas, de la que cierra primero a la última")
+        dias = (prox["Cierre"] - ind.hoy).dt.days
+        tabla = pd.DataFrame({
+            "": ["🔴" if d < 15 else "🟠" if d <= 37 else "🟢" for d in dias],
+            "Convocatoria": prox["Nombre de la Convocatoria"].str.split(" \\(").str[0],
+            "Quién la ofrece": prox["Actor"].map(I.corto), "Tipo": prox["Modalidad"].astype(str).str.split(" \\(").str[0],
+            "Cierra": prox["Cierre"].dt.strftime("%d/%m/%Y"), "Días": dias.astype(int), "Página": prox["Cómo aplicar"]})
+        st.dataframe(tabla, hide_index=True, width="stretch",
+                     column_config={"Página": st.column_config.LinkColumn(display_text="Abrir ↗"),
+                                    "": st.column_config.TextColumn(width=30),
+                                    "Convocatoria": st.column_config.TextColumn(width="large")})
+        st.caption("🔴 menos de 15 días · 🟠 hasta 37 días · 🟢 más plazo")
+    lectura(ind.textos["lecturas"]["abiertas"])
 
 with tabs[2]:
-    texto(ind.textos["no_oficial"])
-    no = df[df["Carácter"] == "No Oficial"]
-    if len(no):
+    vista = st.radio("Ver", ["Todas", "Oficial", "No oficial"], horizontal=True, label_visibility="collapsed")
+    sub = df if vista == "Todas" else df[df["Carácter"] == ("Oficial" if vista == "Oficial" else "No Oficial")]
+    color = {"Todas": "#256abf", "Oficial": AZUL, "No oficial": NARANJA}[vista]
+    texto(ind.textos["oficial"] if vista == "Oficial" else ind.textos["no_oficial"] if vista == "No oficial" else
+          ind.textos["oficial"] + " " + ind.textos["no_oficial"])
+    if len(sub):
         a, b = st.columns([1, 1.3])
         with a:
-            st.subheader("Por tipo de actor")
-            st.plotly_chart(barras_simples(no["Tipo de actor"].value_counts(), NARANJA, total=len(no)), width="stretch")
+            st.subheader("Por tipo de entidad")
+            st.plotly_chart(barras_simples(sub["Tipo de actor"].value_counts(), color, total=len(sub)), width="stretch")
         with b:
-            st.subheader("Actores con más convocatorias")
-            top = ind.actores("No Oficial", 15)
-            st.plotly_chart(barras_simples(top.set_index("Actor")["Convocatorias"], NARANJA,
+            st.subheader("Quién ofrece más")
+            g = sub.groupby(["Actor", "Tipo de actor"]).size().reset_index(name="Convocatorias")
+            top = g.sort_values(["Convocatorias", "Actor"], ascending=[False, True]).head(12)
+            st.plotly_chart(barras_simples(top.set_index("Actor")["Convocatorias"], color,
                                            dict(zip(top["Actor"], top["Tipo de actor"].str.split(" /").str[0])), actores=True),
                             width="stretch")
-        st.subheader("Actores privados y de la sociedad civil")
-        priv = no[no["Tipo de actor"].isin(D.PRIVADOS)]
-        tabla = (priv.groupby(["Tipo de actor", "Actor"]).size().reset_index(name="Convocatorias")
-                 .sort_values(["Tipo de actor", "Convocatorias"], ascending=[True, False]))
-        st.dataframe(tabla, hide_index=True, width="stretch")
-        st.subheader("Temáticas de la oferta no oficial")
-        st.plotly_chart(barras_simples(ind.conteo("Áreas temáticas de interés", sub=no, multi=True, top=10), NARANJA, total=len(no)),
-                        width="stretch")
+        lectura(ind.textos["lecturas"]["quien"])
+        if vista != "Oficial":
+            with st.expander("Actores privados y de la sociedad civil (detalle)"):
+                no = df[df["Carácter"] == "No Oficial"]
+                priv = no[no["Tipo de actor"].isin(D.PRIVADOS)]
+                st.dataframe(priv.groupby(["Tipo de actor", "Actor"]).size().reset_index(name="Convocatorias")
+                             .sort_values(["Tipo de actor", "Convocatorias"], ascending=[True, False]), hide_index=True, width="stretch")
 
 with tabs[3]:
     texto(ind.textos["tematicas"])
-    st.subheader("Temáticas más frecuentes")
-    st.plotly_chart(barras_caracter(ind.por_caracter("Áreas temáticas de interés", multi=True, top=12)), width="stretch")
+    st.subheader("Temas más frecuentes")
+    st.plotly_chart(barras_caracter(ind.por_caracter("Áreas temáticas de interés", multi=True, top=10)), width="stretch")
     conteos, partes = ind.temas_por_trimestre(10)
     if partes.shape[1] >= 1:
-        st.subheader("Participación de cada temática por trimestre")
-        texto(ind.textos["tendencia"])
-        cols = [f"T{q.quarter} {q.year}" + (" (en curso)" if ind.corte < q.end_time.normalize() else "") for q in partes.columns]
-        fig = go.Figure(go.Heatmap(
-            z=partes.values, x=cols, y=[I.etiqueta(i) for i in partes.index], colorscale=[[i / 6, c] for i, c in enumerate(AZULES)],
-            text=[[f"{v:.0f} % ({int(c)})" for v, c in zip(fila_p, fila_c)] for fila_p, fila_c in zip(partes.values, conteos.values)],
-            texttemplate="%{text}", hovertemplate="%{y}<br>%{x}: %{text}<extra></extra>", xgap=3, ygap=3,
-            colorbar=dict(title="%", thickness=12)))
-        fig.update_yaxes(autorange="reversed")
-        st.plotly_chart(estilo(fig, 90 + 44 * len(partes)), width="stretch")
-        st.caption("Porcentaje de las convocatorias de cada trimestre que incluyen la temática; entre paréntesis, el número.")
-
-with tabs[4]:
+        with st.expander("¿Cómo cambian los temas en el tiempo?"):
+            cols = [f"T{q.quarter} {q.year}" + (" (en curso)" if ind.corte < q.end_time.normalize() else "") for q in partes.columns]
+            fig = go.Figure(go.Heatmap(
+                z=partes.values, x=cols, y=[I.etiqueta(i) for i in partes.index], colorscale=[[i / 6, c] for i, c in enumerate(AZULES)],
+                text=[[f"{v:.0f} % ({int(c)})" for v, c in zip(fila_p, fila_c)] for fila_p, fila_c in zip(partes.values, conteos.values)],
+                texttemplate="%{text}", hovertemplate="%{y}<br>%{x}: %{text}<extra></extra>", xgap=3, ygap=3,
+                colorbar=dict(title="%", thickness=12)))
+            fig.update_yaxes(autorange="reversed")
+            st.plotly_chart(estilo(fig, 90 + 44 * len(partes)), width="stretch")
+            st.caption("Porcentaje de las convocatorias de cada trimestre que incluyen el tema; entre paréntesis, el número.")
     texto(ind.textos["publico"])
     a, b = st.columns(2)
     with a:
-        st.subheader("Público dirigido")
-        st.plotly_chart(barras_caracter(ind.por_caracter("Dirigida a (tipo de publico)", multi=True, top=10)), width="stretch")
+        st.subheader("¿A quién se dirigen?")
+        st.plotly_chart(barras_simples(ind.conteo("Dirigida a (tipo de publico)", multi=True).drop(index=["Sin dato"], errors="ignore")
+                                       .head(8), "#1a9e77", total=ind.total), width="stretch")
     with b:
-        st.subheader("Poblaciones priorizadas")
+        st.subheader("Poblaciones que se priorizan")
         pobl = ind.conteo("Esta convocatoria prioriza alguna de las siguientes poblaciones?", multi=True)
-        pobl = pobl.drop(index=[i for i in pobl.index if i.lower().startswith(("ninguna", "sin dato"))], errors="ignore").head(10)
-        st.plotly_chart(barras_simples(pobl, AZUL, total=ind.total), width="stretch")
-    texto(ind.textos["alineacion"])
-    a, b = st.columns(2)
-    with a:
-        st.subheader("Sectores CAD")
-        st.plotly_chart(barras_caracter(ind.por_caracter("Comite de Ayuda al Desarrollo", top=10)), width="stretch")
-    with b:
-        st.subheader("ODS")
-        st.plotly_chart(barras_caracter(ind.por_caracter("ODS", top=10)), width="stretch")
+        pobl = pobl.drop(index=[i for i in pobl.index if i.lower().startswith(("ninguna", "sin dato"))], errors="ignore").head(8)
+        st.plotly_chart(barras_simples(pobl, "#1a9e77", total=ind.total), width="stretch")
+    lectura(ind.textos["lecturas"]["publico"])
+    with st.expander("Alineación con los sectores CAD y los ODS"):
+        texto(ind.textos["alineacion"])
+        a, b = st.columns(2)
+        with a:
+            st.subheader("Sectores CAD")
+            st.plotly_chart(barras_caracter(ind.por_caracter("Comite de Ayuda al Desarrollo", top=10)), width="stretch")
+        with b:
+            st.subheader("ODS")
+            st.plotly_chart(barras_caracter(ind.por_caracter("ODS", top=10)), width="stretch")
 
-with tabs[5]:
+with tabs[4]:
     inc = ind.inconsistencias()
     st.subheader("Puntos para revisar en la base")
     st.markdown(f"- **{len(inc['actores_en_ambos'])} actores** aparecen como oficiales y como no oficiales.")
@@ -251,7 +296,7 @@ with tabs[5]:
     st.markdown(f"- **{inc['sin_actor']}** convocatorias sin nombre de actor · **{inc['por_clasificar']}** con actor sin tipo · "
                 f"**{inc['tipo_sugerido']}** con tipo de actor sugerido por reglas (no revisado).")
 
-with tabs[6]:
+with tabs[5]:
     columnas = ["Nombre de la Convocatoria", "Carácter", "Actor", "Tipo de actor", "Modalidad", "Fecha de Registro",
                 "Fecha Límite de Aplicación", "Áreas temáticas de interés", "Dirigida a (tipo de publico)", "ODS",
                 "Comite de Ayuda al Desarrollo", "Cómo aplicar"]
@@ -261,13 +306,13 @@ with tabs[6]:
     df[columnas].to_excel(buf, index=False)
     st.download_button("Descargar en Excel", buf.getvalue(), f"convocatorias_filtradas_{date.today():%Y-%m-%d}.xlsx")
 
-with tabs[7]:
+with tabs[6]:
     st.subheader("Informe automático")
-    st.write("Genera el informe en Word con los filtros actuales: ficha técnica, resumen ejecutivo, oficial y no oficial, "
-             "temáticas y tendencia, público, CAD y ODS, y calidad del dato.")
+    st.write("Genera un informe de **3 páginas**, en lenguaje sencillo, con los filtros actuales: lo más importante y las "
+             "cifras clave; quién ofrece, en qué temas y para quién; y las convocatorias abiertas que cierran primero, con "
+             "enlace a su página oficial.")
     st.caption(f"Filtros: {texto_filtros}")
-    pdf = st.checkbox("Generar también PDF", value=True,
-                      help="En el servidor de Hugging Face el PDF se genera con LibreOffice. En un computador requiere LibreOffice o Word.")
+    pdf = st.checkbox("Generar también PDF", value=True, help="El PDF se genera directamente en el servidor, sin LibreOffice ni Word.")
     if st.button("Generar informe", type="primary"):
         with st.spinner("Generando informe…"):
             with tempfile.TemporaryDirectory() as tmp:
@@ -276,7 +321,7 @@ with tabs[7]:
                 st.session_state["informe_docx"] = (ruta_docx.name, ruta_docx.read_bytes())
                 st.session_state["informe_pdf"] = (ruta_pdf.name, ruta_pdf.read_bytes()) if ruta_pdf else None
         if pdf and not st.session_state.get("informe_pdf"):
-            st.info("No se encontró LibreOffice ni Word para crear el PDF. Abre el Word y guárdalo como PDF.")
+            st.info("No se pudo crear el PDF. Descarga el Word y guárdalo como PDF.")
     if st.session_state.get("informe_docx"):
         nombre, datos = st.session_state["informe_docx"]
         st.download_button("Descargar Word", datos, nombre,

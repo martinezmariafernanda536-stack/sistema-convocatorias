@@ -32,7 +32,15 @@ from .config import MODALIDADES, Fuente, modalidad_de
 
 log = logging.getLogger("mapeo")
 URL_API = "https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent"
-MODELO_POR_DEFECTO = "gemini-3.8-flash"
+# Flash-Lite: en el plan gratuito permite unas 500 consultas al día (3.8 Flash, solo 20). La cuota es por modelo, así que
+# cuando uno la agota se sigue con el siguiente de la cadena.
+MODELO_POR_DEFECTO = "gemini-3.5-flash-lite"
+CADENA_MODELOS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash"]
+# modelos con cupo gratuito muy bajo (unas 20 consultas al día): si están configurados, van al final de la cadena
+_CUPO_BAJO = ("gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-pro")
+_AGOTADOS = set()   # modelos que ya agotaron su cupo del día en esta sesión
+ULTIMO_MODELO = {"nombre": ""}
+_RITMO = {"ultima": 0.0, "pausa": 6.5, "fallas": 0}  # Flash-Lite gratuito: ~10 consultas por minuto
 URL_MODELOS = "https://generativelanguage.googleapis.com/v1beta/models"
 # Modelo que de verdad respondió en esta sesión (si Google retiró el configurado, se usa el que Google sugiere).
 _REEMPLAZO = {}
@@ -43,6 +51,88 @@ SUSPENDIDO = {"motivo": ""}
 
 def reiniciar_corrida():
     SUSPENDIDO["motivo"] = ""
+    _AGOTADOS.clear()
+    _RITMO["fallas"] = 0
+
+
+def cadena(modelo):
+    """Orden en que se prueban los modelos: el configurado primero (salvo que tenga cupo gratuito muy bajo)."""
+    modelo = _REEMPLAZO.get(modelo, modelo) or MODELO_POR_DEFECTO
+    orden = [m for m in CADENA_MODELOS if m != modelo]
+    orden = (orden + [modelo]) if modelo.startswith(_CUPO_BAJO) else ([modelo] + orden)
+    return [m for m in dict.fromkeys(orden) if m not in _AGOTADOS]
+
+
+def _mensaje(r):
+    try:
+        return r.json().get("error", {}).get("message", r.text[:300])
+    except ValueError:
+        return r.text[:300]
+
+
+def _pedir(cuerpo, clave, modelo, espera, buscar_en_google):
+    """Hace la consulta con reintentos: si Google está saturado (503) o no responde a tiempo, reintenta y luego prueba
+    otro modelo; si un modelo agotó su cupo del día (429), sigue con el siguiente; si el modelo fue retirado (404),
+    usa el que Google sugiere."""
+    import time
+    errores = []
+    for m in cadena(modelo):
+        for intento in range(3):
+            falta = _RITMO["pausa"] - (time.time() - _RITMO["ultima"])
+            if falta > 0:
+                time.sleep(falta)  # respetar el límite por minuto del plan gratuito
+            _RITMO["ultima"] = time.time()
+            try:
+                r = requests.post(URL_API.format(modelo=m), json=cuerpo, timeout=espera,
+                                  headers={"x-goog-api-key": clave, "Content-Type": "application/json"})
+            except requests.Timeout:
+                errores.append(f"{m}: no respondió en {espera} s")
+                if intento < 1:
+                    continue
+                break  # dos esperas largas: mejor otro modelo
+            except requests.RequestException as e:
+                raise ErrorGemini(f"No se pudo conectar con Gemini: {e}") from e
+            if r.status_code == 200:
+                ULTIMO_MODELO["nombre"] = m
+                return r.json()
+            msg = _mensaje(r)
+            if _retirado(r.status_code, msg):
+                nuevo = _modelo_sugerido(msg, clave)
+                if nuevo and nuevo != m and nuevo not in _AGOTADOS:
+                    log.warning("El modelo %s ya no está disponible; se usa %s.", m, nuevo)
+                    _REEMPLAZO[m] = nuevo
+                    m = nuevo
+                    continue
+                errores.append(f"{m}: retirado")
+                break
+            if r.status_code == 429:
+                diario = "per day" in msg.lower() or "perday" in msg.lower() or "daily" in msg.lower()
+                if diario:
+                    _AGOTADOS.add(m)
+                    log.warning("El modelo %s agotó su cupo gratuito de hoy; se sigue con otro modelo.", m)
+                    errores.append(f"{m}: cupo del día agotado")
+                    break
+                espera_min = re.search(r"retry in (\d+(?:\.\d+)?)s", msg)
+                time.sleep(min(60, float(espera_min.group(1)) + 1) if espera_min else 20)  # límite por minuto
+                continue
+            if r.status_code in (500, 502, 503, 504):
+                errores.append(f"{m}: saturado ({r.status_code})")
+                time.sleep((5, 15, 0)[intento])
+                continue
+            error = f"Gemini respondió {r.status_code}: {msg}"
+            if r.status_code in (400, 403) and buscar_en_google and ("search" in msg.lower() or "grounding" in msg.lower()
+                                                                      or "billing" in msg.lower()):
+                error += (" — La búsqueda en Google de Gemini puede requerir facturación activa en este modelo. "
+                          "El completado de campos del mapeo no la necesita.")
+            if r.status_code in (401, 403):
+                SUSPENDIDO["motivo"] = error  # clave inválida: no tiene sentido repetirlo en esta corrida
+            raise ErrorGemini(error)
+    if modelo and not cadena(modelo):  # todos los modelos agotaron su cupo del día
+        SUSPENDIDO["motivo"] = ("Gemini respondió 429: se agotó el cupo gratuito de hoy en todos los modelos ("
+                                + ", ".join(sorted(_AGOTADOS)) + "). Se reinicia a medianoche, hora del Pacífico.")
+        raise ErrorGemini(SUSPENDIDO["motivo"])
+    raise ErrorGemini("Gemini no respondió: " + "; ".join(errores[-4:]))
+
 
 
 def _modelo_sugerido(mensaje, clave):
@@ -146,8 +236,9 @@ Los campos con lista deben usar exactamente uno de los valores indicados:
 
 
 # --- 2. Llamada ------------------------------------------------------------
-def llamar(prompt, clave, modelo, espera=120, buscar_en_google=True):
+def llamar(prompt, clave, modelo, espera=None, buscar_en_google=True):
     """Devuelve (texto, [(uri, título)] de las páginas que Google usó)."""
+    espera = espera or (120 if buscar_en_google else 50)
     prueba = os.environ.get("MAPEO_GEMINI_PRUEBA" if buscar_en_google else "MAPEO_GEMINI_PRUEBA_COMPLETAR")
     if prueba:
         datos = json.loads(Path(prueba).read_text(encoding="utf-8"))
@@ -162,33 +253,7 @@ def llamar(prompt, clave, modelo, espera=120, buscar_en_google=True):
             cuerpo["generationConfig"]["responseMimeType"] = "application/json"
         if SUSPENDIDO["motivo"]:
             raise ErrorGemini(SUSPENDIDO["motivo"])
-        modelo = _REEMPLAZO.get(modelo, modelo)
-        for intento in range(2):
-            r = requests.post(URL_API.format(modelo=modelo), json=cuerpo, timeout=espera,
-                              headers={"x-goog-api-key": clave, "Content-Type": "application/json"})
-            if r.status_code == 200:
-                break
-            try:
-                msg = r.json().get("error", {}).get("message", r.text[:300])
-            except ValueError:
-                msg = r.text[:300]
-            if intento == 0 and _retirado(r.status_code, msg):
-                nuevo = _modelo_sugerido(msg, clave)
-                if nuevo and nuevo != modelo:
-                    log.warning("El modelo %s ya no está disponible; se usa %s. Conviene poner %s en "
-                                "Parametros → Modelo de Gemini (o en el secreto GEMINI_MODEL).", modelo, nuevo, nuevo)
-                    _REEMPLAZO[modelo] = nuevo
-                    modelo = nuevo
-                    continue
-            error = f"Gemini respondió {r.status_code}: {msg}"
-            if r.status_code in (400, 403) and buscar_en_google and ("search" in msg.lower() or "grounding" in msg.lower()
-                                                                      or "billing" in msg.lower()):
-                error += (" — La búsqueda en Google de Gemini puede requerir facturación activa en este modelo. "
-                          "El completado de campos del mapeo no la necesita.")
-            if r.status_code in (401, 403) or _retirado(r.status_code, msg) or (r.status_code == 429 and "day" in msg.lower()):
-                SUSPENDIDO["motivo"] = error  # no tiene sentido repetirlo en esta corrida
-            raise ErrorGemini(error)
-        datos = r.json()
+        datos = _pedir(cuerpo, clave, modelo, espera, buscar_en_google)
     cand = (datos.get("candidates") or [{}])[0]
     texto = "".join(p.get("text", "") for p in cand.get("content", {}).get("parts", []))
     meta = cand.get("groundingMetadata") or {}
@@ -512,12 +577,13 @@ def completar_mapeo(filas, cfg, catalogos, hoy, clave=None, modelo=None, maximo=
         log.info("Sin clave de Gemini: las convocatorias quedan con los campos leídos en la página.")
         return 0
     modelo = modelo or os.environ.get("GEMINI_MODEL") or str(cfg.p("Modelo de Gemini", MODELO_POR_DEFECTO) or MODELO_POR_DEFECTO)
-    pausa = float(cfg.p("Pausa entre consultas a Gemini (segundos)", 5) or 0)
+    pausa = float(cfg.p("Pausa entre consultas a Gemini (segundos)", 6.5) or 0)
+    _RITMO["pausa"] = max(pausa, 4.0)
     if maximo is None:
         maximo = int(cfg.p("Máximo de convocatorias a completar con Gemini por corrida", 80) or 0)
     pendientes = [f for f in filas if f.get("_texto") and f.get("[Sistema] Estado") != "Sin cambios"][:maximo]
-    if pendientes:
-        log.info("  Completando %d convocatorias con Gemini (%s)…", len(pendientes), modelo)
+    if len(pendientes) > 1:
+        log.info("  Completando %d convocatorias con Gemini…", len(pendientes))
     hechas = 0
     for i, fila in enumerate(pendientes):
         try:
@@ -527,11 +593,17 @@ def completar_mapeo(filas, cfg, catalogos, hoy, clave=None, modelo=None, maximo=
         except (ErrorGemini, requests.RequestException) as e:
             if SUSPENDIDO["motivo"] or "429" in str(e):  # clave, modelo o límite: no seguir insistiendo
                 SUSPENDIDO["motivo"] = SUSPENDIDO["motivo"] or str(e)
-                log.warning("Gemini no se usará en lo que queda de esta corrida (%s). Las convocatorias quedan con los "
-                            "campos leídos en la página y se envían igual a la bandeja.", e)
+                log.warning("Gemini no se usará en lo que queda de esta corrida (%s). Lo que falta se completa en la "
+                            "próxima búsqueda.", str(e)[:300])
                 break
-            log.warning("Gemini no pudo completar «%s»: %s", fila["Nombre de la Convocatoria"][:60], e)
+            log.warning("Gemini no pudo completar «%s»: %s", fila["Nombre de la Convocatoria"][:60], str(e)[:200])
+            _RITMO["fallas"] += 1
+            if _RITMO["fallas"] >= 4:  # varias seguidas: Google está saturado; no gastar la corrida esperando
+                SUSPENDIDO["motivo"] = "Gemini está saturado (varias consultas seguidas sin respuesta)"
+                log.warning("%s: lo que falta se completa en la próxima búsqueda.", SUSPENDIDO["motivo"])
+                break
             continue
+        _RITMO["fallas"] = 0
         fila["_veredicto"] = {"es_convocatoria": c.get("es_convocatoria", True) is not False,
                               "colombia": str(c.get("colombia") or "no se indica").lower(),
                               "estado": str(c.get("estado") or "no se indica").lower(),
@@ -541,8 +613,6 @@ def completar_mapeo(filas, cfg, catalogos, hoy, clave=None, modelo=None, maximo=
             ("Campos completados por Gemini leyendo la página (confirmar): " + ", ".join(usados) + ". " if usados else "")
             + "Frase de elegibilidad: " + fila["[Sistema] Evidencia de Gemini en la página"] + ".")
         hechas += 1
-        if pausa and i < len(pendientes) - 1 and not os.environ.get("MAPEO_GEMINI_PRUEBA_COMPLETAR"):
-            time.sleep(pausa)
     return hechas
 
 
@@ -566,6 +636,7 @@ def probar(clave=None, modelo=None, cfg=None):
                  "El modelo no está disponible: pon GEMINI_MODEL = \"gemini-3.8-flash\" en los secretos." if " 404" in t else
                  "No se pudo conectar con Gemini." if isinstance(e, requests.RequestException) else "Gemini no respondió bien.")
         return False, _REEMPLAZO.get(modelo, modelo), f"{claro} Detalle: {t[:300]}"
-    usado = _REEMPLAZO.get(modelo, modelo)
-    nota = f" (el modelo configurado, {modelo}, ya no está disponible; se usó {usado})" if usado != modelo else ""
-    return True, usado, "Gemini responde correctamente" + nota + "."
+    usado = ULTIMO_MODELO["nombre"] or _REEMPLAZO.get(modelo, modelo)
+    nota = (f" Respondió {usado} (el configurado, {modelo}, está agotado, saturado o tiene un cupo gratuito muy bajo; "
+            "el sistema lo usa solo como último recurso)." if usado != modelo else "")
+    return True, usado, "Gemini responde correctamente." + nota

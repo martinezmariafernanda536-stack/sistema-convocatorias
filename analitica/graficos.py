@@ -11,6 +11,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
 
 from .indicadores import CARACTER, corto, etiqueta, mes_corto  # noqa: E402
 
@@ -167,4 +168,108 @@ def proporcion(n_oficial, n_no_oficial):
             ha="center", va="center", color=TINTA, fontsize=9, fontweight="bold")
     ax.set_xlim(0, total * 1.005)
     ax.axis("off")
+    return _png(fig)
+
+
+# --- gráficos compactos del informe de 3 páginas ------------------------------------------
+NAVY_G = "#0B2545"
+MODALIDAD_COLOR = {"Beca": "#2a78d6", "Subvención": "#eb6834", "Premio": "#1a9e77", "Cooperación técnica": "#8a63d2"}
+
+
+def _color_mod(k):
+    return MODALIDAD_COLOR.get(str(k).split(" (")[0], "#9aa4b1")
+
+
+def _barras_h(ax, serie, colores, total=None, ancho=30, fuente=8):
+    s = serie.iloc[::-1]
+    y = np.arange(len(s))
+    ax.barh(y, s.values, height=0.62, color=colores[::-1] if isinstance(colores, list) else colores, zorder=2)
+    maximo = max(1, s.values.max())
+    for yy, v in zip(y, s.values):
+        ax.text(v + maximo * 0.02, yy, f"{int(v)}" + (f" ({100 * v / total:.0f} %)" if total else ""), va="center",
+                fontsize=fuente - 0.5, color=TINTA2)
+    ax.set_yticks(y, [_envolver(corto(k) if len(str(k)) > 45 else k, ancho) for k in s.index], fontsize=fuente)
+    ax.tick_params(axis="y", length=0)
+    ax.tick_params(axis="x", labelsize=7, colors="#9aa4b1")
+    ax.set_xlim(0, maximo * 1.35)
+    ax.xaxis.grid(True, color=REJILLA, lw=0.5, zorder=0)
+    ax.spines["bottom"].set_visible(False)
+
+
+def panel_resumen(ind):
+    """Izquierda: convocatorias por modalidad. Derecha: registradas por mes."""
+    fig, (a, b) = plt.subplots(1, 2, figsize=(7.1, 2.6), gridspec_kw={"width_ratios": [1, 1.5], "wspace": 0.4})
+    mod = ind.conteo("Modalidad")
+    colores = [_color_mod(k) for k in mod.index]
+    mod.index = [str(k).split(" (")[0] for k in mod.index]
+    _barras_h(a, mod, colores, total=ind.total, ancho=22)
+    a.set_title("Convocatorias por tipo", loc="left", fontsize=9, fontweight="bold", color=NAVY_G)
+    pm = ind.por_mes().sum(axis=1)
+    parcial = ind.corte < pm.index[-1].end_time.normalize()
+    x = np.arange(len(pm))
+    colores = [AZUL] * len(pm)
+    if parcial:
+        colores[-1] = "#bcd3f0"
+    b.bar(x, pm.values, color=colores, width=0.7, zorder=2)
+    completos = pm.iloc[:-1] if parcial else pm
+    if len(completos) >= 3:  # tendencia: promedio de tres meses
+        media = completos.rolling(3, min_periods=3).mean()
+        b.plot(x[:len(media)], media.values, color=NAVY_G, lw=1.8, zorder=3, label="Promedio de 3 meses")
+        b.legend(frameon=False, fontsize=6.5, loc="upper right")
+    imax = int(np.argmax(pm.values))
+    for xx, v in zip(x, pm.values):
+        if v:
+            b.text(xx, v + max(1, pm.max()) * 0.03, str(int(v)), ha="center", fontsize=6.5,
+                   color=NAVY_G if xx == imax else TINTA2, fontweight="bold" if xx == imax else "normal")
+    paso = max(1, -(-len(pm) // 6))
+    b.set_xticks(x[::paso], [mes_corto(p) for p in pm.index][::paso], fontsize=7)
+    b.tick_params(axis="y", labelsize=7, colors="#9aa4b1", length=0)
+    b.yaxis.grid(True, color=REJILLA, lw=0.5, zorder=0)
+    b.set_ylim(0, max(1, pm.max()) * 1.3)
+    b.spines["left"].set_visible(False)
+    b.set_title("Registradas por mes" + ("  ·  barra clara: mes en curso" if parcial else ""), loc="left",
+                fontsize=9, fontweight="bold", color=NAVY_G)
+    return _png(fig)
+
+
+def panel_quien(ind, top=8):
+    """Izquierda: oferentes con más convocatorias (azul oficial, naranja no oficial). Derecha: temas más frecuentes."""
+    fig, (a, b) = plt.subplots(1, 2, figsize=(7.1, 0.75 + 0.27 * top), gridspec_kw={"wspace": 0.95})
+    g = ind.df.groupby(["Actor", "Carácter"]).size().reset_index(name="n").sort_values("n", ascending=False)
+    g = g.drop_duplicates("Actor").head(top)
+    serie = pd.Series(g["n"].values, index=[corto(x) for x in g["Actor"]])
+    _barras_h(a, serie, [COLOR.get(c, AZUL) for c in g["Carácter"]], ancho=26, fuente=7.5)
+    a.set_title("Entidades con más convocatorias", loc="left", fontsize=9, fontweight="bold", color=NAVY_G)
+    from matplotlib.patches import Patch
+    a.legend(handles=[Patch(color=AZUL, label="Oficial"), Patch(color=NARANJA, label="No oficial")], loc="lower right",
+             frameon=False, fontsize=7, ncol=2, bbox_to_anchor=(1.05, -0.2))
+    temas = ind.conteo("Áreas temáticas de interés", multi=True).drop(index=["Sin dato"], errors="ignore").head(top)
+    _barras_h(b, temas, "#256abf", total=ind.total, ancho=26, fuente=7.5)
+    b.set_title("Temas más frecuentes (% del total)", loc="left", fontsize=9, fontweight="bold", color=NAVY_G)
+    return _png(fig)
+
+
+def barras_publico(serie, total):
+    fig, ax = plt.subplots(figsize=(3.4, 0.45 + 0.27 * len(serie)))
+    _barras_h(ax, serie, "#1a9e77", total=total, ancho=24, fuente=7.5)
+    return _png(fig)
+
+
+def cierres_mes(tabla):
+    """Convocatorias abiertas según el mes en que cierran, apiladas por modalidad."""
+    fig, ax = plt.subplots(figsize=(7.1, 1.55))
+    x = np.arange(len(tabla))
+    base = np.zeros(len(tabla))
+    for col in tabla.columns:
+        ax.bar(x, tabla[col].values, bottom=base, color=_color_mod(col), width=0.6, label=str(col).split(" (")[0], zorder=2)
+        base += tabla[col].values
+    for xx, v in zip(x, base):
+        if v:
+            ax.text(xx, v + max(1, base.max()) * 0.04, str(int(v)), ha="center", fontsize=7, color=TINTA2)
+    ax.set_xticks(x, [mes_corto(p) for p in tabla.index], fontsize=7.5)
+    ax.tick_params(axis="y", labelsize=7, colors="#9aa4b1", length=0)
+    ax.yaxis.grid(True, color=REJILLA, lw=0.5, zorder=0)
+    ax.set_ylim(0, max(1, base.max()) * 1.3)
+    ax.spines["left"].set_visible(False)
+    ax.legend(frameon=False, fontsize=7, ncol=len(tabla.columns), loc="upper right")
     return _png(fig)

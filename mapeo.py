@@ -205,6 +205,13 @@ def revisar_fuente(fuente, cfg, args, icetex, duplicados, conocidas=frozenset(),
     def analizar(r, url, texto_enlace, pagina, seccion_de="", contexto=""):
         nonlocal analizadas
         analizadas += 1
+        if not seccion_de:  # si la página tiene versión en español, se usa esa (menos traducción, mejor información)
+            es = extraer.version_en_espanol(r.html, r.url)
+            if es and es not in vistas and extraer.es_del_dominio(es, fuente.dominio or r.url):
+                r_es = lector.leer(es, forzar_navegador=fuente.requiere_navegador)
+                if r_es.ok:
+                    vistas.add(es)
+                    r = r_es
         datos = extraer.analizar_beca(r, fuente, cfg, hoy, texto_enlace)
         if contexto:  # lo general de la página (calendario, cómo aplicar) solo como contexto para Gemini, no para las fechas
             datos["texto_pagina"] = (datos.get("texto_pagina", "") + "\n\nInformación general de la página (vale para todas "
@@ -308,7 +315,10 @@ def mapear(cfg, args):
     usar_gemini = (not getattr(args, "sin_gemini", False)
                    and str(cfg.p("Completar campos con Gemini en el mapeo", "Sí")).lower().startswith("s")
                    and bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("MAPEO_GEMINI_PRUEBA_COMPLETAR")))
-    maximo_nuevas = int(getattr(args, "maximo_nuevas", None) or cfg.p("Máximo de convocatorias nuevas por búsqueda", 40) or 40)
+    # meta: cuántas convocatorias completas deben llegar a la bandeja; tope: consultas a Gemini, para cuidar el cupo diario
+    meta = int(getattr(args, "maximo_nuevas", None) or cfg.p("Convocatorias completas por búsqueda", 20) or 20)
+    tope = int(cfg.p("Máximo de consultas a Gemini por búsqueda", 120) or 120)
+    maximo_nuevas = meta
     externo.reiniciar_corrida()
     CONTEO.update(bandeja=0, por_completar=0, duplicadas=0)
     if not getattr(args, "sin_bandeja", False) and usar_gemini:
@@ -361,23 +371,40 @@ def mapear(cfg, args):
                  len(res["paginas"]), res["analizadas"], len(res["sin_cambios"]), revision, desc, hechas, len(fuentes))
 
     # 2. elegir las mejores candidatas: no hace falta traer cientos; mejor pocas y completas
-    elegidas = sorted(pool, key=lambda f: prioridad(f, hoy), reverse=True)
-    if getattr(args, "sin_bandeja", False):
-        elegidas = elegidas  # en modo de prueba sin bandeja se reportan todas
-    else:
-        elegidas = elegidas[:maximo_nuevas]
-    if len(pool) > len(elegidas):
-        log.info("Se encontraron %d candidatas; en esta búsqueda se completan las %d más prometedoras (abiertas, con fecha y "
-                 "elegibles primero). Las demás se consideran en la próxima.", len(pool), len(elegidas))
+    # la misma convocatoria publicada en varios idiomas en el mismo sitio: se deja una (en español si la hay)
+    from calidad.entrada import idioma as _idioma
+    por_nucleo, unicas = {}, []
+    for f in sorted(pool, key=lambda f: (_idioma(f["Nombre de la Convocatoria"]) != "es", -prioridad(f, hoy))):
+        clave = (f["_fuente"], extraer.nucleo(f["Nombre de la Convocatoria"].split(" (")[0]))
+        if len(clave[1]) >= 2 and clave in por_nucleo:
+            f["[Sistema] Resultado"] = "Misma convocatoria en otro idioma: se usó «" + por_nucleo[clave][:80] + "»"
+            historial.registrar(f["_url"], f["_fuente"], f, hoy.isoformat())
+            continue
+        if len(clave[1]) >= 2:
+            por_nucleo[clave] = f["Nombre de la Convocatoria"]
+        unicas.append(f)
+    if len(unicas) < len(pool):
+        log.info("%d candidatas eran la misma convocatoria en otro idioma: no se gastan consultas en ellas.", len(pool) - len(unicas))
+    elegidas = sorted(unicas, key=lambda f: prioridad(f, hoy), reverse=True)
+    log.info("Se encontraron %d candidatas. Se completan, de la más prometedora a la menos (abiertas, con fecha y elegibles "
+             "primero), hasta que %d lleguen completas a la bandeja.", len(unicas), meta)
 
-    # 3. completar (traducir con Gemini) y guardar solo lo que quede completo
+    # 3. completar (traducir con Gemini) y guardar solo lo que quede completo, hasta llegar a la meta
+    consultas, motivo_fin = 0, ""
     for k, fila in enumerate(elegidas, 1):
         if DETENER.is_set():
             log.warning("Detenido: lo completado hasta aquí ya quedó guardado.")
+            motivo_fin = "se detuvo"
+            break
+        if CONTEO["bandeja"] >= meta and not getattr(args, "sin_bandeja", False):
+            break  # meta cumplida: las demás candidatas quedan para la próxima búsqueda
+        if usar_gemini and consultas >= tope:
+            motivo_fin = f"se llegó al tope de {tope} consultas a Gemini por búsqueda"
             break
         if usar_gemini and externo.SUSPENDIDO["motivo"]:
             log.warning("Gemini dejó de responder (%s): las %d candidatas restantes se consideran en la próxima búsqueda.",
                         externo.SUSPENDIDO["motivo"][:200], len(elegidas) - k + 1)
+            motivo_fin = "Gemini dejó de responder: " + externo.SUSPENDIDO["motivo"][:160]
             break
         url, fuente_id = fila["_url"], fila["_fuente"]
         if not str(fila.get("_texto", "")).strip():  # un PDF u otra página sin texto legible: no se puede completar sola
@@ -388,6 +415,7 @@ def mapear(cfg, args):
             continue
         intento_gemini = False
         if usar_gemini:
+            consultas += 1
             intento_gemini = externo.completar_mapeo([fila], cfg, CATALOGOS, hoy, maximo=1) > 0
             if not intento_gemini and externo.SUSPENDIDO["motivo"]:
                 fila["[Sistema] Resultado"] = "Para la próxima búsqueda (Gemini no respondió)"
@@ -402,6 +430,8 @@ def mapear(cfg, args):
                 descartadas.append((motivo + (v.get("motivo") or "según la lectura de Gemini"), fila["Nombre de la Convocatoria"],
                                     url, fuente_id))
                 log.info("  Descartada al leerla: %s · %s", fila["Nombre de la Convocatoria"][:60], motivo + v.get("motivo", "")[:120])
+                log.info("  Completando {%d de %d} · resultado: a la bandeja %d · por completar %d", k, len(elegidas),
+                         CONTEO["bandeja"], CONTEO["por_completar"])
                 continue
         if not getattr(args, "sin_bandeja", False):
             # sin Gemini, lo incompleto no se guarda: se vuelve a considerar cuando Gemini pueda completarlo
@@ -422,8 +452,12 @@ def mapear(cfg, args):
             historial.marcar_visto(fila["_enlace"], fuente_id, hoy.isoformat())
         historial.guardar()
         _avisar("historial", historial.ruta)
-        log.info("  Completando {%d de %d} · resultado: a la bandeja %d · por completar %d", k, len(elegidas),
-                 CONTEO["bandeja"], CONTEO["por_completar"])
+        log.info("  Completas {%d de %d} · consultas a Gemini %d · resultado: a la bandeja %d · por completar %d",
+                 min(CONTEO["bandeja"], meta), meta, consultas, CONTEO["bandeja"], CONTEO["por_completar"])
+    if CONTEO["bandeja"] < meta and not getattr(args, "sin_bandeja", False):
+        motivo_fin = motivo_fin or ("no había más candidatas nuevas en las fuentes" if usar_gemini else
+                                    "Gemini está apagado: solo pasa lo que ya está en español y completo")
+        log.warning("Llegaron %d de las %d convocatorias completas buscadas: %s.", CONTEO["bandeja"], meta, motivo_fin)
     filas = [f for f in pool if f["[Sistema] Resultado"] != "Descartada al leerla"]  # el reporte muestra todo lo encontrado
     for f in pool:
         for c in ("_texto", "_url", "_enlace", "_fuente", "_veredicto"):
@@ -435,7 +469,8 @@ def mapear(cfg, args):
     ruta = carpeta / f"revision_{hoy.isoformat()}.xlsx"
     salidas.escribir_revision(ruta, filas, descartadas, resumen, retiradas)
     historial.guardar()
-    log.info("Listo: %d convocatorias para revisión, %d descartadas, %d ya no aparecen.", len(filas), len(descartadas), len(retiradas))
+    log.info("Listo: %d candidatas encontradas, %d descartadas por las reglas, %d ya no aparecen en su sitio.", len(filas),
+             len(descartadas), len(retiradas))
     if not getattr(args, "sin_bandeja", False):
         log.info("%d convocatorias completas enviadas a la bandeja de revisión; %d quedaron «Por completar» y %d ya estaban "
                  "registradas este año.", enviadas_total, CONTEO["por_completar"], CONTEO["duplicadas"])
@@ -491,6 +526,12 @@ def prioridad(fila, hoy):
         p += 3 + (1 if 7 <= dias <= 120 else 0)
     elif str(fila.get("¿La convocatoria es permanente?", "")).lower().startswith("s"):
         p += 1.5
+    from motor.extraer import nucleo
+    propias = nucleo(fila.get("Nombre de la Convocatoria", "").split(" (")[0])
+    if not propias:
+        p -= 5  # «Call for Proposals», «Grants Calls», «Becas»: casi siempre una página de listado, no una convocatoria
+    elif len(propias) == 1:
+        p -= 1
     largo = len(str(fila.get("_texto", "")))
     p += 1 if largo > 1500 else (-2 if largo < 400 else 0)
     if "título" in str(fila.get("[Sistema] Motivo modalidad", "")).lower():
@@ -653,6 +694,7 @@ def completar_pendientes(cfg, args, hoy=None, maximo=None):
             item["meta"].pop("pendientes", None)
             flujo._evento(item, "Sistema", "Ingreso", "Completada y enviada a la bandeja")
             pasaron += 1
+            CONTEO["bandeja"] += 1  # cuenta para la meta de la búsqueda
         almacen.guardar_item(item)
         _avisar("item", None)
     siguen = len(almacen.items(entrada.ESTADO))
@@ -882,7 +924,7 @@ def main(argv=None):
     p.add_argument("--sin-bandeja", action="store_true", help="Mapear sin enviar a la bandeja (solo Excel)")
     p.add_argument("--reemplazar", action="store_true", help="migrar: borrar la base propia y volver a cargarla")
     p.add_argument("--todo-a-revision", action="store_true", help="importar: enviar todas las nuevas a la bandeja")
-    p.add_argument("--maximo-nuevas", type=int, help="mapear: cuántas convocatorias nuevas completar en esta búsqueda")
+    p.add_argument("--maximo-nuevas", type=int, help="mapear: cuántas convocatorias completas deben llegar a la bandeja (meta)")
     p.add_argument("--sin-gemini", action="store_true", help="mapear: no completar campos con Gemini en esta corrida")
     p.add_argument("--completo", action="store_true", help="mapear: revisión completa (vuelve a abrir también las convocatorias ya conocidas)")
     p.add_argument("--reintentar-todas", action="store_true", help="completar-pendientes: también las que ya agotaron los intentos")

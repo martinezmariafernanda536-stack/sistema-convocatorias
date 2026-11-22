@@ -93,6 +93,47 @@ def descubrir_paginas(fuente, lector, cfg):
     return mejores, nota
 
 
+_IDIOMAS = {"english", "espanol", "español", "francais", "français", "portugues", "português", "deutsch", "italiano",
+            "nederlands", "русский", "中文", "日本語", "한국어", "العربية", "en", "es", "fr", "pt", "de", "it", "eng", "esp", "fra",
+            "en espanol", "en español", "version en espanol", "versión en español", "english version", "version francaise",
+            "version française", "em portugues", "em português", "auf deutsch", "in english"}
+
+
+def es_enlace_de_idioma(texto_a):
+    """«Français», «English», «Español»: el selector de idioma de la página, no una convocatoria."""
+    t = re.sub(r"\s+", " ", (texto_a or "").strip().lower())
+    return t in _IDIOMAS or bool(re.fullmatch(r"(?:[a-z]{2}\s*\|\s*)+[a-z]{2}", t))
+
+
+def version_en_espanol(html, url):
+    """Si la página declara su versión en español (<link rel="alternate" hreflang="es">), devuelve ese enlace."""
+    from urllib.parse import urljoin
+    for m in re.finditer(r"<link[^>]+>", html[:60000], re.I):
+        etiqueta = m.group(0)
+        if re.search(r"rel=[\"']?alternate", etiqueta, re.I) and re.search(r"hreflang=[\"']?es(?:[-_][a-z]{2})?[\"'\s>]", etiqueta, re.I):
+            h = re.search(r"href=[\"']([^\"']+)", etiqueta, re.I)
+            if h:
+                destino = urljoin(url, h.group(1))
+                return "" if destino.split("#")[0].rstrip("/") == url.split("#")[0].rstrip("/") else destino
+    return ""
+
+
+_GENERICAS = set("""call calls proposal proposals grant grants funding fund funds opportunity opportunities open now apply
+application applications scholarship scholarships fellowship fellowships program programs programme programmes award awards
+prize prizes convocatoria convocatorias beca becas programa programas premio premios subvencion subvenciones ayuda ayudas
+financiacion financiamiento bourse bourses appel appels projets projet edital editais bolsa bolsas chamada chamadas foerderung
+stipendium stipendien the for and of de la el los las le les des du en para por y et a an to in on with new nueva nuevo
+nouveau novo year years ronda round espanol francais portugues english deutsch national nacional international internacional
+information informacion more mas sobre about our nuestras nuestros nos home inicio page pagina news noticias""".split())
+
+
+def nucleo(titulo):
+    """Palabras propias del nombre (sin las genéricas ni las de idioma): «Le programme de bourses France Excellence
+    Eiffel» y «France Excellence Eiffel scholarship program» tienen el mismo núcleo."""
+    t = unicodedata.normalize("NFKD", (titulo or "").lower()).encode("ascii", "ignore").decode()
+    return frozenset(w for w in re.findall(r"[a-z0-9]+", t) if len(w) >= 3 and w not in _GENERICAS and not w.isdigit())
+
+
 def candidatas(html, url_pagina, fuente, cfg):
     """Enlaces a convocatorias individuales dentro de una página de listado."""
     maximo = int(cfg.p("Máximo de convocatorias por página", 25))
@@ -101,7 +142,7 @@ def candidatas(html, url_pagina, fuente, cfg):
     for url, texto_a in _enlaces(html, url_pagina):
         if url.rstrip("/") == url_pagina.rstrip("/") or not es_del_dominio(url, fuente.dominio or url_pagina):
             continue
-        if len(texto_a) < 6:
+        if len(texto_a) < 6 or es_enlace_de_idioma(texto_a):
             continue
         if _puntaje_enlace(url, texto_a, cfg, terminos) >= 2:
             salida.append((url, texto_a))

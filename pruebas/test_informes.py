@@ -63,10 +63,36 @@ def test_filtro_solo_no_oficial(df):
 
 
 def test_informe_word(df, tmp_path):
+    """Informe corto: tres páginas, lenguaje sencillo, cifras clave y las abiertas que cierran primero."""
     ruta, _ = INF.generar(df, tmp_path / "informe.docx", pdf=False)
     from docx import Document
     doc = Document(ruta)
-    titulos = [p.text for p in doc.paragraphs if p.style.name.startswith("Heading")]
-    for esperado in ("Ficha técnica", "Resumen ejecutivo", "2. Cooperación oficial", "6. Alineación con el CAD y los ODS"):
-        assert esperado in titulos
-    assert len(doc.inline_shapes) >= 12  # gráficos
+    textos = [p.text for p in doc.paragraphs]
+    for esperado in ("Principales resultados", "¿Quién ofrece y en qué temas?", "¿A quién se dirigen?",
+                     "Convocatorias abiertas: las que cierran primero", "Notas metodológicas"):
+        assert esperado in textos
+    assert len(doc.inline_shapes) <= 6                      # pocas gráficas, compactas
+    saltos = sum(1 for p in doc.paragraphs for r in p.runs if 'w:br' in r._r.xml and 'type="page"' in r._r.xml)
+    assert saltos == 2                                       # tres páginas
+    ind = I.calcular(df)
+    assert 3 <= len(ind.textos["mensajes"]) <= 5
+
+
+def test_el_informe_analiza_y_no_da_instrucciones(df, tmp_path):
+    ruta, _ = INF.generar(df, tmp_path / "informe.docx", pdf=False)
+    from docx import Document
+    doc = Document(ruta)
+    todo = " ".join(p.text for p in doc.paragraphs) + " ".join(c.text for t in doc.tables for f in t.rows for c in f.cells)
+    for palabra in ("Lectura estratégica", "Acciones sugeridas", "conviene", "se recomienda", "debe hacerse"):
+        assert palabra.lower() not in todo.lower(), palabra
+
+
+def test_pdf_sin_libreoffice(df, tmp_path, monkeypatch):
+    """El PDF se genera directamente en Python: no depende de LibreOffice ni de Word."""
+    import re
+    monkeypatch.setattr(INF, "convertir_pdf", lambda ruta: None)  # como si no hubiera LibreOffice
+    _, pdf = INF.generar(df, tmp_path / "informe.docx", pdf=True)
+    assert pdf is not None and pdf.exists()
+    datos = pdf.read_bytes()
+    assert datos.startswith(b"%PDF")
+    assert len(re.findall(rb"/Type\s*/Page\b", datos)) == 3
