@@ -160,8 +160,8 @@ class Informe:
         h.set(qn("r:id"), rid)
         r = OxmlElement("w:r")
         rpr = OxmlElement("w:rPr")
-        for etiqueta, valor in (("w:color", "1F5FAF"), ("w:u", "single"), ("w:sz", str(int(tam * 2)))):
-            e = OxmlElement(etiqueta)
+        for nombre_xml, valor in (("w:color", "1F5FAF"), ("w:u", "single"), ("w:sz", str(int(tam * 2)))):
+            e = OxmlElement(nombre_xml)
             e.set(qn("w:val"), valor)
             rpr.append(e)
         r.append(rpr)

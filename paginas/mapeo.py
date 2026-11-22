@@ -26,7 +26,21 @@ st.caption("El sistema revisa los sitios oficiales de los oferentes y trae becas
 
 
 def config_bytes():
-    return A.leer_archivo(CFG) or (RAIZ / "config" / CFG).read_bytes()
+    """La configuración guardada en la app, con las hojas y parámetros nuevos del paquete (se guardan una sola vez)."""
+    guardada = A.leer_archivo(CFG)
+    if not guardada:
+        return (RAIZ / "config" / CFG).read_bytes()
+    if st.session_state.get("_cfg_revisada") != len(guardada):
+        from motor import config as _cfgmod
+        try:
+            completa = _cfgmod.completar_con_paquete(guardada, RAIZ / "config" / CFG)
+        except Exception:  # noqa: BLE001 - si algo falla se usa la guardada tal cual
+            completa = guardada
+        if completa != guardada:
+            A.guardar_archivo(CFG, completa)
+            guardada = completa
+        st.session_state["_cfg_revisada"] = len(guardada)
+    return guardada
 
 
 def ejecutar(comando, etiqueta, extra=()):
@@ -136,6 +150,7 @@ def tabla_sugeridas(sug, clave, origen):
 
 def revisar_version():
     """Avisa si en el servidor quedaron archivos de versiones distintas (pasa al subirlos por partes)."""
+    import importlib.util
     faltan = []
     try:
         import mapeo as programa
@@ -143,13 +158,11 @@ def revisar_version():
             faltan.append("mapeo.py")
         if importlib.util.find_spec("motor.radar") is None:
             faltan.append("motor/radar.py")
-        import importlib.util
         from motor import extraer, externo
         if not hasattr(extraer, "secciones"):
             faltan.append("motor/extraer.py")
         if not getattr(externo, "MODELO_POR_DEFECTO", "").startswith("gemini-3"):
             faltan.append("motor/externo.py")
-        import importlib.util
         if importlib.util.find_spec("calidad.entrada") is None:
             faltan.append("calidad/entrada.py")
     except Exception as e:  # noqa: BLE001

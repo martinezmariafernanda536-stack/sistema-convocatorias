@@ -40,9 +40,25 @@ with st.expander("🔎 Buscar convocatorias nuevas", expanded=True):
    convocatorias** (la meta se puede cambiar en las opciones). Las candidatas que no alcanzaron se consideran en la siguiente
    búsqueda. Si no hay 20 nuevas disponibles, el resultado dice por qué.
 5. Lo que ya está registrado este año (aunque tenga otro enlace o el nombre traducido) no vuelve a entrar.
+6. En cada búsqueda también se vuelven a abrir unas 40 convocatorias de la base que ya cerraron, para encontrar su
+   **nueva edición** del año siguiente (seguimiento año tras año).
 
 **Cada cuánto:** una vez por semana es suficiente. La primera vez tarda más, porque todavía no conoce ninguna convocatoria;
 después solo abre lo nuevo y es mucho más rápida.
+""")
+
+with st.expander("📡 Descubrir convocatorias fuera de las fuentes"):
+    st.markdown("""
+1. En **Buscar convocatorias**, pulsa **Descubrir convocatorias** (recuadro aparte, debajo de la búsqueda normal).
+2. El sistema lee sitios que publican convocatorias de muchos oferentes (por ejemplo Opportunity Desk) **solo como radar**:
+   sigue cada enlace hasta la **página oficial** del oferente y registra únicamente esa. También consulta el portal de
+   financiación de la Unión Europea.
+3. Lo encontrado pasa por los mismos filtros y llega a **Revisar convocatorias**.
+4. Al terminar aparece la tabla **Fuentes sugeridas**: sitios oficiales nuevos que aportaron convocatorias. El administrador
+   marca los que quiere y quedan en la lista de fuentes.
+
+**Qué sitios usa:** se activan, apagan o agregan en la hoja **«Radar»** de la configuración (*Mantenimiento de fuentes →
+Configuración*). **Cada cuánto:** cada dos semanas es suficiente.
 """)
 
 with st.expander("✅ Revisar una convocatoria"):

@@ -175,3 +175,40 @@ def cargar(ruta=RUTA_CONFIG):
                 modalidades=modalidades_de(f.get("Modalidades a buscar"))))
     return Config(fuentes, palabras_beca, exclusion, reglas, icetex_nombres, icetex_paginas,
                   icetex_palabras, tematicas, alineacion, parametros, columnas, Path(ruta), palabras_modalidad, radar)
+
+
+def completar_con_paquete(contenido, ruta_paquete=RUTA_CONFIG):
+    """Agrega a una configuración guardada en la app lo nuevo del paquete (hojas y parámetros que no tiene).
+
+    La configuración que se edita en la app no se reemplaza al actualizar el programa: así se conservan las fuentes y
+    los cambios del administrador, y solo se suman hojas nuevas (por ejemplo «Radar») y parámetros nuevos.
+    Devuelve los mismos bytes si no faltaba nada."""
+    import io
+    from copy import copy
+    guardada = load_workbook(io.BytesIO(contenido))
+    paquete = load_workbook(ruta_paquete)
+    cambio = False
+    for nombre in paquete.sheetnames:
+        if nombre in guardada.sheetnames:
+            continue
+        origen, destino = paquete[nombre], guardada.create_sheet(nombre)
+        for fila in origen.iter_rows():
+            for c in fila:
+                d = destino.cell(row=c.row, column=c.column, value=c.value)
+                if c.has_style:
+                    d.font, d.fill, d.alignment, d.border = copy(c.font), copy(c.fill), copy(c.alignment), copy(c.border)
+        for letra, dim in origen.column_dimensions.items():
+            destino.column_dimensions[letra].width = dim.width
+        cambio = True
+    if "Parametros" in guardada.sheetnames and "Parametros" in paquete.sheetnames:
+        ws = guardada["Parametros"]
+        tiene = {str(r[0].value or "").strip() for r in ws.iter_rows(min_row=2)}
+        for r in paquete["Parametros"].iter_rows(min_row=2, values_only=True):
+            if r and r[0] and str(r[0]).strip() not in tiene:
+                ws.append(list(r))
+                cambio = True
+    if not cambio:
+        return contenido
+    salida = io.BytesIO()
+    guardada.save(salida)
+    return salida.getvalue()

@@ -681,3 +681,25 @@ def test_agregar_fuente_sugerida_por_el_radar(tmp_path):
     cab = [c.value for c in ws[1]]
     ultima = {cab[i]: c.value for i, c in enumerate(ws[ws.max_row])}
     assert ultima["Nombre"] == "Fundación Ejemplo" and ultima["Origen"] == "Descubrimiento (radar)"
+
+
+def test_configuracion_guardada_recibe_hojas_y_parametros_nuevos(tmp_path):
+    """Al actualizar el programa, la configuración editada en la app conserva sus cambios y recibe lo nuevo (hoja Radar)."""
+    import io
+    from openpyxl import load_workbook
+    from motor import config as C
+    wb = load_workbook(RAIZ / "config" / "configuracion_mapeo_becas.xlsx")
+    del wb["Radar"]
+    ws = wb["Parametros"]
+    for fila in list(ws.iter_rows(min_row=2)):
+        if fila[0].value == "Publicaciones a revisar por agregador":
+            ws.delete_rows(fila[0].row)
+    wb["Fuentes"]["D2"] = "Fuente editada por el administrador"
+    b = io.BytesIO()
+    wb.save(b)
+    nuevo = C.completar_con_paquete(b.getvalue())
+    wb2 = load_workbook(io.BytesIO(nuevo))
+    assert "Radar" in wb2.sheetnames and wb2["Radar"]["D2"].value == "Opportunity Desk"
+    assert wb2["Fuentes"]["D2"].value == "Fuente editada por el administrador"
+    assert "Publicaciones a revisar por agregador" in {r[0].value for r in wb2["Parametros"].iter_rows(min_row=2)}
+    assert C.completar_con_paquete(nuevo) == nuevo   # si ya está completa, no se toca
