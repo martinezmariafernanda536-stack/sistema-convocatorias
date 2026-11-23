@@ -156,10 +156,23 @@ def tabla_sugeridas(sug, clave, origen):
 def revisar_version():
     """Avisa si en el servidor quedaron archivos de versiones distintas (pasa al subirlos por partes)."""
     import importlib.util
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(RAIZ / "herramientas"))
+        import manifiesto
+        version, distintos = manifiesto.revisar()
+    except Exception:  # noqa: BLE001
+        version, distintos = None, []
+    if distintos:
+        st.error(f"**En GitHub quedaron archivos de paquetes distintos** (el paquete es la versión {version}). No coinciden: "
+                 + ", ".join(distintos[:12]) + ("…" if len(distintos) > 12 else "") + ". Las búsquedas no se lanzan "
+                 "hasta corregirlo. **Sube de nuevo el contenido completo del último paquete** (todos los archivos a la "
+                 "vez) y reinicia la app.")
+        return
     faltan = []
     try:
         import mapeo as programa
-        if getattr(programa, "VERSION", "") < "2026-11-23c":
+        if getattr(programa, "VERSION", "") < "2026-11-23f":
             faltan.append("mapeo.py")
         if importlib.util.find_spec("motor.radar") is None:
             faltan.append("motor/radar.py")
@@ -452,7 +465,9 @@ with st.container(border=True):
                 ("Revisada: aún sin edición nueva", "revisadas, todavía sin edición nueva"),
                 ("En temporada: se revisa en la próxima búsqueda", "en temporada, por revisar"),
                 ("Sin página oficial para seguirla", "sin página oficial: no se pueden seguir")]):
-            col.metric(lab, int(cuenta.get(estado, 0)))
+            col.markdown(f"<div class='kpi'><div class='v'>{int(cuenta.get(estado, 0))}</div><div class='l'>{lab}</div></div>",
+                         unsafe_allow_html=True)
+        st.write("")
         st.caption(f"{len(seg)} convocatorias de la base ya cerraron. "
                    f"{int(cuenta.get('Fuera de temporada: se revisará al acercarse', 0))} están fuera de temporada y se "
                    "revisarán cuando se acerque su fecha.")
@@ -472,8 +487,10 @@ with st.container(border=True):
             st.download_button("Descargar (Excel)", buf.getvalue(), "seguimiento_ediciones.xlsx",
                                icon=":material/download:", key="seg_dl")
         if int(cuenta.get("Sin página oficial para seguirla", 0)):
-            st.caption("Las que no tienen página oficial («Cómo aplicar») no se pueden seguir: complétales el enlace en "
-                       "la base para que entren al seguimiento.")
+            st.caption("«Sin página oficial» son las que en «Cómo aplicar» tienen un formulario (Google, Qualtrics, "
+                       "Airtable), un PDF, un texto sin enlace o la portada del sitio, y tampoco tienen una página útil en "
+                       "«Link de la Fuente Oferente». Para que entren al seguimiento, ponles en la base el enlace de la "
+                       "página de la convocatoria.")
     else:
         st.caption("Todavía no hay convocatorias cerradas en la base para seguir.")
 

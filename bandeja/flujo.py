@@ -232,7 +232,7 @@ def registrar_actor_creado(almacen, nombre_actual, nombre_en_ciclope, usuario, t
 
 # --- completar a mano, restaurar y recuperar anuladas ---------------------------------------
 PAPELERA = "anuladas.json"  # copias de las convocatorias borradas del sistema, para recuperarlas si fue un error
-MAX_PAPELERA = 3000
+MAX_PAPELERA = 1000
 
 
 def enviar_a_completar_a_mano(almacen, items, usuario):
@@ -272,6 +272,7 @@ def anular(almacen, items, usuario, motivo):
     papelera = json.loads(almacen.leer_archivo(PAPELERA) or b"[]")
     for item in items:
         copia = json.loads(json.dumps(item, ensure_ascii=False, default=str))
+        copia["historial"] = copia.get("historial", [])[-15:]  # lo reciente basta: la copia ocupa menos
         copia["anulada"] = {"fecha": ahora(), "usuario": usuario, "motivo": motivo}
         papelera.append(copia)
     papelera = papelera[-MAX_PAPELERA:]

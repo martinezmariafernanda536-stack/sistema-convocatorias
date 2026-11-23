@@ -198,6 +198,15 @@ def _parecido(a, b, umbral):
     return _compatibles(a, b) and _semejanza(a, b) >= umbral
 
 
+def _otra_edicion_por_fecha(d, o, dias=60):
+    """True si las dos tienen fecha límite y la nueva cierra al menos `dias` después de la anterior.
+
+    Cubre las convocatorias que abren otra edición dentro del mismo año (por ejemplo, una ronda en marzo y otra en
+    noviembre) en la misma página: por el año parecerían la misma, pero la fecha dice que es otra."""
+    fa, fb = fecha(d.get("Fecha Límite de Aplicación")), fecha(o.get("Fecha Límite de Aplicación"))
+    return bool(fa and fb and (fa - fb).days >= dias)
+
+
 def buscar_duplicado(d, otros, umbral_nombre=92):
     """Compara con otras convocatorias. Devuelve (tipo, otra) donde tipo es:
     'mismo_año'         la misma convocatoria ya está registrada para ese año (duplicado)
@@ -215,6 +224,9 @@ def buscar_duplicado(d, otros, umbral_nombre=92):
             _mismo_oferente(d.get("Nombre de la Fuente", ""), o.get("Nombre de la Fuente", ""))
             or (len(nombre.split()) >= 5 and _semejanza(nombre, otro_nombre) >= 97))
         if not (igual_url or parecido):
+            continue
+        if _otra_edicion_por_fecha(d, o):  # misma página, pero con un cierre nuevo bien posterior: es otra edición
+            anterior = anterior or o
             continue
         if mismo_periodo(d, o):
             if igual_url:
@@ -381,6 +393,33 @@ def f_dmy(d):
 
 def marcado(v):
     return str(v).strip().lower() in ("checked", "true", "1", "sí", "si", "x")
+
+
+_MARCA_FIN = re.compile(r"\b(hasta|al|until|through|thru|to|deadline|cierra|cierre|cierran|l[ií]mite|vence|vencimiento|"
+                       r"antes del?|before|by|no later than|closes?|closing)\b[^.;\n]{0,40}$", re.I)
+
+
+def cierre_en_observaciones(d):
+    """La única fecha en que, según el texto de «Observaciones a la fecha límite», se cierra la postulación
+    («… hasta el 30 de septiembre de 2026», «deadline: March 3, 2027»). None si el texto no la dice o si da varias
+    fechas de cierre (rondas, modalidades), porque entonces no se sabe cuál corresponde."""
+    from motor import texto as T
+    obs = T.normalizar(str(d.get("Observaciones a la fecha límite de aplicación", "") or ""))
+    candidatas = {f for f, pos in T.fechas(obs) if _MARCA_FIN.search(obs[max(0, pos - 60):pos])}
+    return next(iter(candidatas)) if len(candidatas) == 1 else None
+
+
+def fecha_incoherente(d):
+    """Mensaje si la fecha límite del formulario no aparece en las observaciones de la fecha y estas dicen otra."""
+    from motor import texto as T
+    limite, segun_texto = fecha(d.get("Fecha Límite de Aplicación")), cierre_en_observaciones(d)
+    obs = T.normalizar(str(d.get("Observaciones a la fecha límite de aplicación", "") or ""))
+    if limite and any(abs((f - limite).days) <= 1 for f, _ in T.fechas(obs)):
+        return ""  # la fecha del formulario está en el texto: puede haber varias rondas, no es contradicción
+    if limite and segun_texto and abs((limite - segun_texto).days) > 1:
+        return (f"La fecha límite ({limite:%d/%m/%Y}) no coincide con la que dicen las observaciones "
+                f"({segun_texto:%d/%m/%Y})")
+    return ""
 
 
 def validar(registro, catalogo=None, base=None, hoy=None, nuevo=True):
@@ -605,6 +644,11 @@ def validar(registro, catalogo=None, base=None, hoy=None, nuevo=True):
         r["Se sugiere para priorización"] = "checked" if sugerida else ""
         r[CAMPO_MOTIVO_PRIORIZACION] = motivo
 
+    # fecha límite que contradice el texto de las observaciones (por ejemplo, otra fecha de la página)
+    if (msg := fecha_incoherente(r)):
+        add("Fecha Límite de Aplicación", "Alerta", msg, r.get("Fecha Límite de Aplicación", ""),
+            "Confirmar en la página oficial cuál es la fecha límite", "R19")
+
     # 9. Duplicados en el mismo año (otro año = nueva edición, se permite)
     if base:
         tipo, otro = buscar_duplicado(r, [o for o in base if o is not registro])
@@ -641,4 +685,5 @@ REGLAS = {
     "R16": "Duplicados en el mismo año (la misma convocatoria de otro año es una nueva edición)",
     "R17": "Enlaces del sitio oficial del oferente (sin acortadores, agregadores, boletines de otras entidades ni ICETEX)",
     "R18": "Requisitos y condiciones de participación según la modalidad",
+    "R19": "Fecha límite coherente con las observaciones de la fecha",
 }

@@ -184,6 +184,17 @@ def _correr(almacen, tarea, extra, config):
     _guardar_registro(almacen, tarea)
     resultado = None
     try:
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(RAIZ / "herramientas"))
+            import manifiesto
+            version, distintos = manifiesto.revisar()
+        except Exception:  # noqa: BLE001
+            version, distintos = None, []
+        if distintos:
+            raise RuntimeError(f"En GitHub quedaron archivos de paquetes distintos (paquete {version}); no coinciden: "
+                               + ", ".join(distintos[:12]) + ". Sube de nuevo el contenido completo del último paquete y "
+                               "reinicia la app. La búsqueda no se lanzó para no dejarla a medias.")
         viejos = modulos_desactualizados()
         if viejos:
             raise RuntimeError("El servidor sigue usando una versión anterior del programa (" + ", ".join(viejos) + "). "

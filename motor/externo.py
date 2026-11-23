@@ -325,7 +325,10 @@ _VARIAS_FECHAS = re.compile(r"\b(dos|tres|diferentes|distintas|varias) fechas|se
 
 def _coherencia_de_fechas(fila):
     """Si las observaciones de la fecha (el texto de la página) dicen otra fecha de cierre única, manda el texto."""
-    from calidad.reglas import cierre_en_observaciones, fecha_incoherente
+    try:
+        from calidad.reglas import cierre_en_observaciones, fecha_incoherente
+    except ImportError:  # archivos de paquetes distintos: se omite esta corrección en lugar de detener la búsqueda
+        return
     obs = str(fila.get("Observaciones a la fecha límite de aplicación", ""))
     if fecha_incoherente(fila) and not _VARIAS_FECHAS.search(obs):
         segun_texto = cierre_en_observaciones(fila)

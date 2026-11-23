@@ -786,3 +786,43 @@ def test_descarta_noticias_y_ganadores_sin_gemini():
           {"Nombre de la Convocatoria": "British Council Scholarships for Women in STEM", "_url": "https://x.org/s"}]
     assert all(programa.parece_no_convocatoria(f, hoy) for f in no)
     assert not any(programa.parece_no_convocatoria(f, hoy) for f in si)
+
+
+def test_seguimiento_limpia_enlaces_y_usa_el_del_oferente():
+    assert programa.url_de("https://a.net/convocatorias//https://apccolombia.gov.co/x") == "https://a.net/convocatorias/"
+    assert programa.url_de("https://www.ksp.go.kr.") == "https://www.ksp.go.kr"
+    assert programa.url_de("Aplicar en la página web: www.iberescena.org/convocatoria") == "https://www.iberescena.org/convocatoria"
+    # «Cómo aplicar» es un formulario: se sigue la página del oferente (si no es solo la portada)
+    d = {"Cómo aplicar": "https://vuw.qualtrics.com/jfe/form/SV_1", "Link de la Fuente Oferente": "https://www.mfat.govt.nz/manaaki"}
+    assert programa.pagina_para_seguir(d) == "https://www.mfat.govt.nz/manaaki"
+    assert programa.pagina_para_seguir({"Cómo aplicar": "https://x.org/b.pdf", "Link de la Fuente Oferente": "https://x.org"}) == ""
+
+
+def test_otra_edicion_en_el_mismo_ano_por_la_fecha():
+    from calidad.reglas import buscar_duplicado
+    base = [{"Nombre de la Convocatoria": "Acelerador X", "Cómo aplicar": "https://x.org/acel", "Fecha Límite de Aplicación": "15/3/2026"}]
+    nueva = {"Nombre de la Convocatoria": "Acelerador X", "Cómo aplicar": "https://x.org/acel"}
+    assert buscar_duplicado(nueva | {"Fecha Límite de Aplicación": "4/12/2026"}, base)[0] == "edicion_anterior"  # ronda de noviembre
+    assert buscar_duplicado(nueva | {"Fecha Límite de Aplicación": "30/3/2026"}, base)[0] == "mismo_año"         # plazo extendido
+
+
+def test_fecha_limite_que_contradice_las_observaciones():
+    from calidad.reglas import fecha_incoherente, validar
+    obs = ("La solicitud se realizará on-line desde las 9:00 horas del día 10 de julio hasta las 14:00 horas del día "
+           "30 de septiembre de 2026")
+    d = {"Fecha Límite de Aplicación": "27/11/2026", "Observaciones a la fecha límite de aplicación": obs}
+    assert "30/09/2026" in fecha_incoherente(d)
+    assert any(h.regla == "R19" for h in validar(d, hoy=date(2026, 11, 23))[1])
+    # varias rondas con la fecha del formulario en el texto: no es contradicción
+    assert not fecha_incoherente({"Fecha Límite de Aplicación": "16/2/2027", "Observaciones a la fecha límite de aplicación":
+                                  "Dos fechas límite: 30 de septiembre de 2026 (otoño) y hasta el 16 de febrero de 2027"})
+    # al completar con Gemini, si el texto dice otra fecha única, manda el texto (y esta ya pasó: queda cerrada)
+    from motor import externo
+    fila = {"Fecha Límite de Aplicación": "27/11/2026", "Observaciones a la fecha límite de aplicación": obs,
+            "¿La convocatoria es permanente?": "No"}
+    externo._coherencia_de_fechas(fila)
+    assert fila["Fecha Límite de Aplicación"] == "30/9/2026" and "27/11/2026" in fila["[Sistema] Fecha corregida"]
+    varias = {"Fecha Límite de Aplicación": "1/12/2026", "Observaciones a la fecha límite de aplicación":
+              "Existen diferentes fechas límite según la modalidad: hasta el 01/02/2027 para posgrado"}
+    externo._coherencia_de_fechas(varias)
+    assert varias["Fecha Límite de Aplicación"] == "1/12/2026"   # varias fechas: no se toca, queda la alerta para revisar

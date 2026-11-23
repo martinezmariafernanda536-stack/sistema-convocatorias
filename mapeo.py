@@ -209,10 +209,13 @@ TEMPORADA = (-60, 120)  # desde 2 meses después hasta 4 meses antes del anivers
 def url_de(valor):
     """La dirección dentro de «Cómo aplicar», aunque venga con texto («Debe ingresar a … en el link https://…»)."""
     v = str(valor or "").strip()
-    if v.lower().startswith("http") and " " not in v:
-        return v
-    m = re.search(r"https?://[^\s<>\"')\]]+", v)
-    return m.group(0).rstrip(".,;:") if m else ""
+    m = re.search(r"https?://[^\s<>\"')\]]+", v) or re.search(r"(?<![\w@.])www\.[\w-]+(\.[\w-]+)+[^\s<>\"')\]]*", v)
+    if not m:
+        return ""
+    if m.group(0).startswith("www."):
+        return ("https://" + m.group(0)).rstrip(".,;:")
+    url = re.split(r"(?<=.)/?https?://", m.group(0))[0]  # dos enlaces pegados: se toma el primero
+    return url.rstrip(".,;:")
 
 
 def url_siguiente_edicion(url, hoy):
@@ -223,6 +226,17 @@ def url_siguiente_edicion(url, hoy):
     return re.sub(r"(?<!\d)(20\d\d)(?!\d)", lambda m: str(int(m.group(1)) + 1), url)
 
 
+def pagina_para_seguir(d):
+    """La página oficial que se vuelve a abrir: «Cómo aplicar»; si es un formulario, un PDF, un inicio de sesión o no
+    está, el «Link de la Fuente Oferente» (si no es solo la portada del sitio)."""
+    from motor.radar import descartable
+    for campo in ("Cómo aplicar", "Link de la Fuente Oferente"):
+        url = url_de(d.get(campo))
+        if url.lower().startswith("http") and not url.lower().split("?")[0].endswith(".pdf") and not descartable(url):
+            return url
+    return ""
+
+
 def _seguibles(base, hoy):
     """Convocatorias de la base que pueden repetirse: no permanentes, ya cerradas y con página oficial.
 
@@ -230,8 +244,8 @@ def _seguibles(base, hoy):
     from calidad.reglas import fecha as _fecha
     abiertas, por_url = set(), {}
     for d in base or []:
-        url = url_de(d.get("Cómo aplicar"))
-        if not url.lower().startswith("http") or url.lower().endswith(".pdf"):
+        url = pagina_para_seguir(d)
+        if not url:
             continue
         if str(d.get("¿La convocatoria es permanente?") or "").strip().lower().startswith("s"):
             continue
@@ -313,7 +327,7 @@ def estado_seguimiento(base, items, seguidas, hoy):
     salida = []
     seg = _seguibles(base, hoy)
     for d in base or []:
-        url = url_de(d.get("Cómo aplicar"))
+        url = pagina_para_seguir(d)
         if url in seg and seg[url][1] is not d:
             continue  # misma página en varias filas: se cuenta una vez
         nombre = d.get("Nombre de la Convocatoria", "")
@@ -325,7 +339,8 @@ def estado_seguimiento(base, items, seguidas, hoy):
         fila = {"Convocatoria": nombre, "Oferente": d.get("Nombre de la Fuente", ""), "Cierre anterior":
                 d.get("Fecha Límite de Aplicación", ""), "Página oficial": url}
         if url not in seg:
-            fila |= {"Estado": "Sin página oficial para seguirla", "Mes de cierre anterior": "", "Última revisión": ""}
+            fila |= {"Estado": "Sin página oficial para seguirla", "Mes de cierre anterior": "", "Última revisión": "",
+                     "Página oficial": url_de(d.get("Cómo aplicar")) or str(d.get("Cómo aplicar") or "")[:120]}
             salida.append(fila)
             continue
         faltan = seg[url][0]
@@ -876,12 +891,16 @@ _ADMINISTRATIVAS = ("tuition", "fees", "cost calculator", "calculadora", "studen
 
 
 _NO_CONV_TITULO = re.compile(
-    r"\b(winners?|ganador(?:es|as?)?|finalists?|finalistas|announces?|anuncia|recibe|receives|awarded|premiad[oa]s|"
-    r"celebrates|congratulat\w*|felicita\w*|resultados|results|informe de resultados|annual report|informe anual|"
-    r"newsletter|bolet[ií]n|webinar|podcast|entrevista|interview|cohorte actual|current cohort|meet the|conoce a|"
-    r"about us|acerca de|qui[eé]nes somos|our story|nuestra historia|testimonios?|testimonials?)\b", re.I)
-_NO_CONV_RUTA = re.compile(r"/(news|noticias|press|prensa|press-releases?|blog|stories|historias|events?|eventos|media|"
-                           r"podcasts?|webinars?|results|resultados|winners|ganadores|finalists|about|about-us|acerca|"
+    r"(\S\s+(recibe|receives|wins|gana)\s.{0,40}\b(premio|beca|award|prize|galard[oó]n|reconocimiento|fellowship))|"
+    r"\b(anuncia\w*|announc\w*|congratulat\w*|felicita\w*|celebrates)\b|"
+    r"\b(ganadores|winners|finalistas|finalists|seleccionad[oa]s|premiad[oa]s)\b|"
+    r"\bresultados de (la |las |los )?(convocatoria|selecci[oó]n|evaluaci[oó]n)|\b(selection )?results (of|announced)\b|"
+    r"\b(informe de resultados|annual report|informe anual|newsletter|bolet[ií]n|webinar|podcast|entrevista|interview|"
+    r"cohorte actual|current cohort|meet the|conoce a|about us|qui[eé]nes somos|our story|nuestra historia|"
+    r"testimonios?|testimonials?)\b", re.I)
+_LLAMADO = re.compile(r"\b(convocatoria|call for|apply|postula|applications? (are )?open|abiertas?|open call)\b", re.I)
+_NO_CONV_RUTA = re.compile(r"/(news|noticias|press|prensa|press-releases?|blog|stories|historias|events?|eventos|"
+                           r"podcasts?|webinars?|winners|ganadores|finalists|about-us|acerca-de|"
                            r"quienes-somos|annual-report|informe-anual|testimonials)(/|$)", re.I)
 
 
@@ -894,8 +913,8 @@ def parece_no_convocatoria(fila, hoy):
     if cierre and cierre >= hoy:
         return ""
     titulo = str(fila.get("Nombre de la Convocatoria", ""))
-    if m := _NO_CONV_TITULO.search(titulo):
-        return f"el título indica una noticia o un resultado («{m.group(0)}»)"
+    if (m := _NO_CONV_TITULO.search(titulo)) and not _LLAMADO.search(titulo):
+        return f"el título indica una noticia o un resultado («{m.group(0).strip()[:40]}»)"
     from urllib.parse import urlparse
     ruta = urlparse(str(fila.get("_url", ""))).path
     if m := _NO_CONV_RUTA.search(ruta):
@@ -1300,7 +1319,7 @@ def externo_reiniciar():
 
 
 # ---------------------------------------------------------------------------
-VERSION = "2026-11-23c"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
+VERSION = "2026-11-23f"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
 
 
 class _Argumentos(argparse.ArgumentParser):

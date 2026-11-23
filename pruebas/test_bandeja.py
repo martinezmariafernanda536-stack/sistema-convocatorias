@@ -817,3 +817,29 @@ def test_recargar_el_modulo_no_pierde_la_busqueda_en_curso(almacen):
         sigue.set()
         hilo.join(5)
         nuevo._ESTADO["actual"] = None
+
+
+def test_manifiesto_del_paquete_coincide_con_los_archivos():
+    """El paquete trae la huella de cada archivo; si en el servidor queda uno de otro paquete, se detecta."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "herramientas"))
+    import manifiesto
+    version, distintos = manifiesto.revisar()
+    assert version and distintos == [], f"Regenerar el manifiesto (python herramientas/manifiesto.py): {distintos}"
+
+
+def test_manifiesto_detecta_archivos_mezclados(tmp_path, monkeypatch):
+    import shutil
+    import sys
+    raiz = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(raiz / "herramientas"))
+    import manifiesto
+    copia = tmp_path / "app"
+    for nombre, ruta in manifiesto.archivos():
+        (copia / nombre).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ruta, copia / nombre)
+    shutil.copy(manifiesto.RUTA, copia / "manifiesto.json")
+    (copia / "calidad" / "reglas.py").write_text("# versión anterior\\n", encoding="utf-8")
+    monkeypatch.setattr(manifiesto, "RAIZ", copia)
+    monkeypatch.setattr(manifiesto, "RUTA", copia / "manifiesto.json")
+    assert manifiesto.revisar()[1] == ["calidad/reglas.py"]
