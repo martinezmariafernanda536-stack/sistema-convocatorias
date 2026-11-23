@@ -245,16 +245,30 @@ def _emparejar(registros, items):
             indice.agregar(i["datos"])
             por_id[id(i["datos"])] = i
     pares = []  # (item, exacta): exacta = mismo nombre y misma fecha de registro (la misma fila de Airtable)
-    for reg in registros:
-        item = por_clave.get(_clave(reg.get("Nombre de la Convocatoria"), reg.get("Fecha de Registro")))
+    for n, reg in enumerate(registros):
+        clave = _clave(reg.get("Nombre de la Convocatoria"), reg.get("Fecha de Registro"))
+        item = por_clave.get(clave)
         exacta = item is not None
+        limpio = {k: ("" if (isinstance(v, float) and v != v) else v) for k, v in reg.items()}
         if item is None:
-            limpio = {k: ("" if (isinstance(v, float) and v != v) else v) for k, v in reg.items()}
             tipo, otro = indice.buscar(limpio)
             if tipo in ("mismo_año", "nombre_mismo_año") and otro is not None:
                 item = por_id.get(id(otro))
+        if item is None:
+            # nueva: se recuerda, para que una fila repetida más abajo en el mismo export no entre dos veces
+            marca = {"id": f"{REPETIDA}{n}", "datos": limpio, "estado": "nueva"}
+            por_clave.setdefault(clave, marca)
+            indice.agregar(limpio)
+            por_id[id(limpio)] = marca
         pares.append((item, exacta))
     return pares
+
+
+REPETIDA = "repetida-en-el-export-"
+
+
+def _repetida(item):
+    return item is not None and str(item.get("id", "")).startswith(REPETIDA)
 
 
 def revisar_actualizacion(df_crudo, almacen):
@@ -262,8 +276,8 @@ def revisar_actualizacion(df_crudo, almacen):
     _, registros = _filas_export(df_crudo)
     pares = _emparejar(registros, almacen.items())
     nuevas = sum(1 for p, _ in pares if p is None)
-    editadas = sum(1 for p, _ in pares if p is not None and editada_en_el_sistema(p))
-    parecidas = sum(1 for p, e in pares if p is not None and not e and not editada_en_el_sistema(p))
+    editadas = sum(1 for p, _ in pares if p is not None and not _repetida(p) and editada_en_el_sistema(p))
+    parecidas = sum(1 for p, e in pares if p is not None and (_repetida(p) or not e and not editada_en_el_sistema(p)))
     return {"filas": len(registros), "nuevas": nuevas, "ya_estan": len(registros) - nuevas,
             "se_pueden_actualizar": len(registros) - nuevas - editadas - parecidas, "editadas_aqui": editadas,
             "iguales_a_otra": parecidas}
@@ -313,6 +327,11 @@ def actualizar(df_crudo, almacen, hoy=None, tipos_corregidos=None, todo_a_revisi
             res["a_la_base" if revisada else "a_revisar"] += 1
             detalle.append({"Fila": n + 2, "Convocatoria": nombre, "Resultado": "Nueva: " + (
                 "entra a la base" if revisada else "va a Revisar convocatorias (no tenía las tres verificaciones)")})
+            continue
+        if _repetida(item):
+            res["iguales_a_otra"] += 1
+            detalle.append({"Fila": n + 2, "Convocatoria": nombre,
+                            "Resultado": "Repetida en este mismo export (otra fila es la misma convocatoria): no se agrega dos veces"})
             continue
         if not exacta or item["id"] in tocados:
             # otra fila con la misma convocatoria del mismo año (por ejemplo, el mismo enlace): no se duplica ni se

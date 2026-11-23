@@ -997,3 +997,35 @@ def test_modelo_antiguo_de_la_configuracion_no_se_usa(monkeypatch):
     assert X.modelo_configurado(Cfg("gemini-3.1-flash-lite")) == "gemini-3.1-flash-lite"
     monkeypatch.setenv("GEMINI_MODEL", "gemini-x")
     assert X.modelo_configurado(Cfg("gemini-2.5-flash")) == "gemini-x"
+
+
+def test_fuentes_sugeridas_traen_la_pagina_para_abrirla():
+    pool = [{"[Sistema] Fuente ID": "RAD-ntu.edu.sg", "Nombre de la Fuente": "NTU", "[Sistema] Resultado": "Por completar",
+             "Cómo aplicar": "https://www.ntu.edu.sg/admissions/beca", "Nombre de la Convocatoria": "Beca NTU"}]
+    (s,) = programa.fuentes_sugeridas(pool)
+    assert list(s)[:2] == ["Oferente", "Página de la convocatoria"]
+    assert s["Página de la convocatoria"] == "https://www.ntu.edu.sg/admissions/beca"
+    assert s["Dominio oficial"] == "https://ntu.edu.sg"
+
+
+def test_gemini_saturado_a_ratos_no_alarga_la_busqueda(monkeypatch):
+    """Cada convocatoria sin respuesta gasta como mucho ~1 minuto de reintentos, y tras 25 se deja para la próxima."""
+    from motor import externo as X
+    reloj = {"t": 0.0}
+    monkeypatch.setattr(X.time if hasattr(X, "time") else __import__("time"), "time", lambda: reloj["t"], raising=False)
+    import time as _t
+    monkeypatch.setattr(_t, "time", lambda: reloj["t"])
+    monkeypatch.setattr(_t, "sleep", lambda s: reloj.__setitem__("t", reloj["t"] + s))
+    class R:
+        status_code = 503
+        def json(self): return {"error": {"message": "overloaded"}}
+        text = "overloaded"
+    pedidos = []
+    def post(*a, **k):
+        pedidos.append(1); reloj["t"] += 2; return R()
+    monkeypatch.setattr(X.requests, "post", post)
+    X.reiniciar_corrida()
+    monkeypatch.setitem(X._RITMO, "ultima", 0.0)
+    with pytest.raises(X.ErrorGemini):
+        X._pedir({}, "k", X.MODELO_POR_DEFECTO, 30, False)
+    assert reloj["t"] < 90 and len(pedidos) <= 6

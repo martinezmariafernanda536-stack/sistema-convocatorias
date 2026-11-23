@@ -872,3 +872,42 @@ def test_historial_se_sube_a_github_como_mucho_cada_dos_minutos(monkeypatch, tmp
     for _ in range(50):
         f("historial", h)
     assert subidas.count("historial_mapeo.json") == 1
+
+
+def test_airtable_no_duplica_lo_que_esta_en_revision_ni_lo_repetido(almacen):
+    """Convocatorias que llegaron del mapeo y siguen por revisar (o por completar) y que alguien también registró en
+    Airtable: no se agregan otra vez. Tampoco las filas repetidas dentro del mismo export."""
+    from calidad import migracion as MG
+    from bandeja import flujo as F
+    df = pd.read_csv(Path(__file__).resolve().parents[1] / "datos" / "airtable_actual.csv", dtype=str)
+    MG.migrar(df, almacen)
+    total = len(almacen.items())
+    base = df.iloc[5].copy()
+    datos = {k: ("" if pd.isna(v) else str(v)) for k, v in base.items() if k in ("Modalidad", "Nombre de la Fuente")}
+    url = "https://fundacion-prueba.org/becas/liderazgo-2027"
+    F.ingresar(almacen, datos | {"Nombre de la Convocatoria": "Beca de Liderazgo Fundación Prueba 2027",
+                                 "Cómo aplicar": url, "Fecha Límite de Aplicación": "2027-03-15"},
+               "Mapeo automático · OFE-1", "Sistema", {}, estado="Por revisar")
+    F.ingresar(almacen, datos | {"Nombre de la Convocatoria": "Premio Fundación Prueba a la Innovación 2027",
+                                 "Cómo aplicar": "https://fundacion-prueba.org/premio-2027"},
+               "Mapeo automático · OFE-1", "Sistema", {"faltantes": ["Fecha"]}, estado="Por completar")
+    assert len(almacen.items()) == total + 2
+    f1 = base.copy()  # la misma beca, registrada en Airtable con otra fecha de registro y el nombre un poco distinto
+    f1["Nombre de la Convocatoria"] = "Beca de liderazgo - Fundación Prueba 2027"
+    f1["Cómo aplicar"] = url
+    f1["Fecha Límite de Aplicación"] = "2027-03-15"
+    f1["Fecha de Registro"] = "2026-11-24"
+    f2 = base.copy()
+    f2["Nombre de la Convocatoria"] = "Premio Fundación Prueba a la Innovación 2027"
+    f2["Cómo aplicar"] = "https://fundacion-prueba.org/premio-2027"
+    f2["Fecha de Registro"] = "2026-11-24"
+    f3 = base.copy()  # nueva de verdad, repetida dos veces en el export
+    f3["Nombre de la Convocatoria"] = "Subvención Nueva Totalmente Distinta 2027"
+    f3["Cómo aplicar"] = "https://otra-organizacion.org/subvencion-2027"
+    f3["Fecha de Registro"] = "2026-11-24"
+    df2 = pd.concat([df, pd.DataFrame([f1, f2, f3, f3])], ignore_index=True)
+    res, _ = MG.actualizar(df2, almacen)
+    nombres = [i["datos"]["Nombre de la Convocatoria"] for i in almacen.items()]
+    assert res["nuevas"] == 1, res
+    assert nombres.count("Subvención Nueva Totalmente Distinta 2027") == 1
+    assert len(almacen.items()) == total + 3

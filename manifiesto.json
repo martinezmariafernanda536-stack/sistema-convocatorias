@@ -1,14 +1,14 @@
 {
- "version": "2026-11-23m",
+ "version": "2026-11-23p",
  "archivos": {
-  "app.py": "39761826a233",
+  "app.py": "a1fa61b8ed7b",
   "componentes.py": "c770b491e08a",
-  "mapeo.py": "8e6c3f497765",
+  "mapeo.py": "486835ead93c",
   "tareas.py": "315e14837660",
   "ui.py": "b3106ad8e671",
   "motor/__init__.py": "da39a3ee5e6b",
   "motor/config.py": "65b54d98eb4d",
-  "motor/externo.py": "6a87127152d4",
+  "motor/externo.py": "09173f09163b",
   "motor/extraer.py": "db5476fa28ce",
   "motor/historial.py": "b89c4b1ce39f",
   "motor/radar.py": "34e0389f5ab3",
@@ -22,7 +22,7 @@
   "calidad/dominios.py": "1794cfd0030c",
   "calidad/entrada.py": "c539b70fe1c3",
   "calidad/exportacion.py": "69e0d68a2f7d",
-  "calidad/migracion.py": "bb6db5c0a7e5",
+  "calidad/migracion.py": "de57adafcf37",
   "calidad/reglas.py": "75fb539486f9",
   "bandeja/__init__.py": "da39a3ee5e6b",
   "bandeja/almacen.py": "58f1665ed870",
@@ -39,7 +39,7 @@
   "paginas/cuenta.py": "a96901199ea8",
   "paginas/guia.py": "2bedf66a12c7",
   "paginas/inicio.py": "c693c6bdc9ca",
-  "paginas/mapeo.py": "d6e49a7d573a",
+  "paginas/mapeo.py": "704f836fd268",
   "paginas/tablero.py": "94e6c3556c39",
   "paginas/usuarios.py": "eb7f67680671"
  }

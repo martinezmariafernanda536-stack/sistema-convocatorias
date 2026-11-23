@@ -51,7 +51,9 @@ def modelo_configurado(cfg=None):
     valor = str((cfg.p("Modelo de Gemini", "") if cfg else "") or "").strip()
     return MODELO_POR_DEFECTO if not valor or valor.startswith(_CUPO_BAJO) else valor
 ULTIMO_MODELO = {"nombre": ""}
-_RITMO = {"ultima": 0.0, "pausa": 6.5, "fallas": 0}  # Flash-Lite gratuito: ~10 consultas por minuto
+_RITMO = {"ultima": 0.0, "pausa": 6.5, "fallas": 0, "sin_respuesta": 0}
+LIMITE_POR_CONSULTA = 60  # segundos de reintentos por convocatoria cuando Google está saturado
+MAX_SIN_RESPUESTA = 25    # convocatorias sin respuesta de Gemini en una búsqueda: Google saturado a ratos, se deja así  # Flash-Lite gratuito: ~10 consultas por minuto
 URL_MODELOS = "https://generativelanguage.googleapis.com/v1beta/models"
 # Modelo que de verdad respondió en esta sesión (si Google retiró el configurado, se usa el que Google sugiere).
 _REEMPLAZO = {}
@@ -65,6 +67,7 @@ def reiniciar_corrida():
     _AGOTADOS.clear()
     _RITMO["fallas"] = 0
     _RITMO["pausas"] = 0
+    _RITMO["sin_respuesta"] = 0
 
 
 def _esperar(segundos):
@@ -104,7 +107,10 @@ def _pedir(cuerpo, clave, modelo, espera, buscar_en_google):
     usa el que Google sugiere."""
     import time
     errores = []
+    inicio = time.time()
     for m in cadena(modelo):
+        if errores and time.time() - inicio > LIMITE_POR_CONSULTA:
+            break  # Google saturado: no gastar varios minutos en una sola convocatoria (queda para la próxima)
         for intento in range(3):
             falta = _RITMO["pausa"] - (time.time() - _RITMO["ultima"])
             if falta > 0:
@@ -154,6 +160,8 @@ def _pedir(cuerpo, clave, modelo, espera, buscar_en_google):
                 continue
             if r.status_code in (500, 502, 503, 504):
                 errores.append(f"{m}: saturado ({r.status_code})")
+                if time.time() - inicio > LIMITE_POR_CONSULTA:
+                    break
                 time.sleep((5, 15, 0)[intento])
                 continue
             error = f"Gemini respondió {r.status_code}: {msg}"
@@ -710,6 +718,12 @@ def completar_mapeo(filas, cfg, catalogos, hoy, clave=None, modelo=None, maximo=
                 break
             log.warning("Gemini no pudo completar «%s»: %s", fila["Nombre de la Convocatoria"][:60], str(e)[:200])
             _RITMO["fallas"] += 1
+            _RITMO["sin_respuesta"] = _RITMO.get("sin_respuesta", 0) + 1
+            if _RITMO["sin_respuesta"] >= MAX_SIN_RESPUESTA:  # saturación intermitente: la búsqueda se alargaría mucho
+                SUSPENDIDO["motivo"] = (f"Gemini dejó sin responder {MAX_SIN_RESPUESTA} convocatorias en esta búsqueda: "
+                                        "Google está saturado a ratos. No es un error del sistema")
+                log.warning("%s: lo que falta se completa en la próxima búsqueda.", SUSPENDIDO["motivo"])
+                break
             if _RITMO["fallas"] >= 4:  # varias seguidas: Google está saturado; no gastar la corrida esperando
                 SUSPENDIDO["motivo"] = ("Gemini está saturado (Google no responde en ningún modelo, aun después de esperar). "
                                         "No es un error del sistema")

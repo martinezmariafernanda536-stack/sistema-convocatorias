@@ -567,13 +567,16 @@ def fuentes_sugeridas(pool):
             continue
         s = sug.setdefault(fid, {"Oferente": f.get("Nombre de la Fuente") or fid[4:], "Dominio oficial": "https://" + fid[4:],
                                  "Tipo de actor": "Por clasificar", "País": "", "Actor en el catálogo": "",
-                                 "Oficial / No Oficial": f.get("Oficial / No Oficial", ""), "_n": 0, "_b": 0, "_c": []})
+                                 "Oficial / No Oficial": f.get("Oficial / No Oficial", ""), "_n": 0, "_b": 0, "_c": [], "_u": []})
         s["_n"] += 1
+        if (u := url_de(f.get("Cómo aplicar"))):
+            s["_u"].append(u)
         s["_b"] += f.get("[Sistema] Resultado") == "Enviada a la bandeja"
         s["_c"].append(str(f.get("Nombre de la Convocatoria", ""))[:90])
     salida = []
     for s in sorted(sug.values(), key=lambda s: (-s["_b"], -s["_n"])):
-        salida.append({k: v for k, v in s.items() if not k.startswith("_")} | {
+        base = {k: v for k, v in s.items() if not k.startswith("_")}
+        salida.append({"Oferente": base.pop("Oferente"), "Página de la convocatoria": (s["_u"] or [""])[0]} | base | {
             "Llegaron a la bandeja": s["_b"], "Candidatas": s["_n"], "Convocatorias encontradas": "; ".join(s["_c"][:5])})
     return salida
 
@@ -771,10 +774,16 @@ def mapear(cfg, args):
             continue
         intento_gemini = False
         if usar_gemini:
+            antes = (consultas, sin_exito)
             consultas += 1
             sin_exito = 0 if CONTEO["bandeja"] > ultimo_conteo else sin_exito + 1
             ultimo_conteo = CONTEO["bandeja"]
             intento_gemini = externo.completar_mapeo([fila], cfg, CATALOGOS, hoy, maximo=1) > 0
+            if "_veredicto" not in fila:  # Gemini no respondió (Google saturado): no gasta el cupo de la búsqueda
+                consultas, sin_exito = antes
+                fila["[Sistema] Resultado"] = "Para la próxima búsqueda (Gemini no respondió)"
+                if not externo.SUSPENDIDO["motivo"]:
+                    continue
             if not intento_gemini and externo.SUSPENDIDO["motivo"]:
                 fila["[Sistema] Resultado"] = "Para la próxima búsqueda (Gemini no respondió)"
                 continue  # se avisa arriba en la siguiente vuelta
@@ -1377,7 +1386,7 @@ def externo_reiniciar():
 
 
 # ---------------------------------------------------------------------------
-VERSION = "2026-11-23m"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
+VERSION = "2026-11-23p"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
 
 
 class _Argumentos(argparse.ArgumentParser):

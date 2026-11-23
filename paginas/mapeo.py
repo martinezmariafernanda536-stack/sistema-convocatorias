@@ -132,17 +132,31 @@ def panel_ejecucion():
                 st.page_link("paginas/bandeja.py", label="Revisar lo que encontró", icon=":material/fact_check:")
 
 
-def tabla_sugeridas(sug, clave, origen):
-    """Sitios oficiales nuevos: el administrador marca cuáles se agregan a la lista de fuentes."""
+def tabla_sugeridas(sug, clave, origen, hojas=None):
+    """Sitios oficiales nuevos: el administrador marca cuáles se agregan a la lista de fuentes.
+
+    El sitio y la página de la convocatoria se abren con un clic, para revisarlos antes de agregarlos."""
+    sug = sug.copy()
+    if "Página de la convocatoria" not in sug.columns:  # reportes anteriores: se toma de la hoja de revisión
+        rev = (hojas or {}).get("Revisión", pd.DataFrame())
+        paginas = {}
+        if {"Nombre de la Fuente", "Cómo aplicar"} <= set(rev.columns):
+            for nombre, url in zip(rev["Nombre de la Fuente"].astype(str), rev["Cómo aplicar"].astype(str)):
+                if url.startswith("http"):
+                    paginas.setdefault(nombre, url)
+        sug.insert(1, "Página de la convocatoria", [paginas.get(str(o), "") for o in sug.get("Oferente", [])])
+    enlaces = {"Página de la convocatoria": st.column_config.LinkColumn("Página de la convocatoria", display_text="Abrir convocatoria ↗",
+                                                                       help="Abre la página oficial en otra pestaña"),
+               "Dominio oficial": st.column_config.LinkColumn("Dominio oficial", help="Abre el sitio en otra pestaña")}
     if YO["rol"] != "admin":
-        st.dataframe(sug, hide_index=True, width="stretch")
+        st.dataframe(sug, hide_index=True, width="stretch", column_config=enlaces)
         st.caption("El administrador decide si se agregan como fuentes.")
         return
-    sug = sug.copy()
     sug.insert(0, "Agregar", False)
-    editado = st.data_editor(sug, hide_index=True, width="stretch", key=clave,
+    st.caption("Haz clic en «Abrir convocatoria ↗» o en el dominio para revisar el sitio antes de agregarlo.")
+    editado = st.data_editor(sug, hide_index=True, width="stretch", key=clave, column_config=enlaces,
                              disabled=[c for c in sug.columns if c != "Agregar"])
-    elegidas = editado[editado["Agregar"]].drop(columns="Agregar").to_dict("records")
+    elegidas = editado[editado["Agregar"]].drop(columns=["Agregar", "Página de la convocatoria"], errors="ignore").to_dict("records")
     if st.button("Agregar los marcados como fuentes", disabled=not elegidas, key=clave + "_btn"):
         import mapeo as programa
         tmp = Path(tempfile.mkdtemp()) / CFG
@@ -172,7 +186,7 @@ def revisar_version():
     faltan = []
     try:
         import mapeo as programa
-        if getattr(programa, "VERSION", "") < "2026-11-23m":
+        if getattr(programa, "VERSION", "") < "2026-11-23p":
             faltan.append("mapeo.py")
         if importlib.util.find_spec("motor.radar") is None:
             faltan.append("motor/radar.py")
@@ -434,7 +448,7 @@ with st.container(border=True):
         if len(sug_d):
             st.markdown(f"**Fuentes sugeridas ({len(sug_d)})**: sitios oficiales que no están en la lista y aportaron "
                         "convocatorias. Al agregarlos, la búsqueda normal los revisa siempre.")
-            tabla_sugeridas(sug_d, "sug_radar", "Descubrimiento (radar)")
+            tabla_sugeridas(sug_d, "sug_radar", "Descubrimiento (radar)", hojas_d)
 
 # --- seguimiento año tras año ---------------------------------------------------------
 @st.cache_data(ttl=600, show_spinner=False)

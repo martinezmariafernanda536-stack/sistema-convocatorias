@@ -3,10 +3,20 @@
 Ejecutar:  streamlit run app.py
 Reúne el dashboard, los informes automáticos, la bandeja de revisión y la base de convocatorias.
 """
-import streamlit as st
+import os
+import time
 
-import ui
-from bandeja import usuarios as U
+# El servidor de Streamlit está en hora UTC: se usa la hora de Colombia en los registros, las fechas de registro y el
+# «hoy» de las reglas (si no, después de las 7 p. m. el sistema ya creería que es el día siguiente).
+os.environ["TZ"] = os.environ.get("ZONA_HORARIA") or (
+    "America/Bogota" if os.path.exists("/usr/share/zoneinfo/America/Bogota") else "<-05>5")  # Colombia: UTC-5, sin horario de verano
+if hasattr(time, "tzset"):
+    time.tzset()
+
+import streamlit as st  # noqa: E402
+
+import ui  # noqa: E402
+from bandeja import usuarios as U  # noqa: E402
 
 st.set_page_config(page_title="Convocatorias · DGDCI", page_icon="📊", layout="wide")
 st.markdown(ui.ESTILOS, unsafe_allow_html=True)
