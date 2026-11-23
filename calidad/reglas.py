@@ -409,6 +409,36 @@ def cierre_en_observaciones(d):
     return next(iter(candidatas)) if len(candidatas) == 1 else None
 
 
+# la palabra de cierre justo antes de la fecha («al 31 de mayo», «hasta el 15», «deadline: March 3»)
+_MARCA_FIN_PEGADA = re.compile(r"\b(hasta|al|until|through|thru|to|deadline|cierra|cierre|cierran|l[ií]mite|vence|"
+                               r"antes del?|before|by|no later than|closes?|closing|close)\b[\s:,]*(el|the|on|del|de)?\s*$",
+                               re.I)
+
+
+def cierre_anual(d, hoy):
+    """Convocatorias que abren cada año en las mismas fechas y no dicen el año («del 1 de enero al 31 de mayo para el
+    semestre de invierno»): devuelve el próximo cierre (este año o el siguiente). None si no hay una fecha así."""
+    from motor import texto as T
+    obs = T.normalizar(str(d.get("Observaciones a la fecha límite de aplicación", "") or ""))
+    if not obs:
+        return None
+    meses = "|".join(sorted(T.MESES, key=len, reverse=True))
+    patrones = [re.compile(rf"\b(\d{{1,2}})(?:º|°|er|st|nd|rd|th)?\s+(?:de\s+)?({meses})\b(?!\.?,?\s+(?:de\s+)?\d{{4}})"),
+                re.compile(rf"\b({meses})\s+(\d{{1,2}})(?:st|nd|rd|th)?\b(?!,?\s+\d{{4}})")]
+    proximas = []
+    for n, patron in enumerate(patrones):
+        for m in patron.finditer(obs):
+            if not _MARCA_FIN_PEGADA.search(obs[max(0, m.start() - 30):m.start()]):
+                continue
+            dia, mes = (m.group(1), m.group(2)) if n == 0 else (m.group(2), m.group(1))
+            try:
+                f = date(hoy.year, T.MESES[mes], int(dia))
+            except (ValueError, KeyError):
+                continue
+            proximas.append(f if f >= hoy else f.replace(year=hoy.year + 1))
+    return min(proximas) if proximas else None
+
+
 def fecha_incoherente(d):
     """Mensaje si la fecha límite del formulario no aparece en las observaciones de la fecha y estas dicen otra."""
     from motor import texto as T

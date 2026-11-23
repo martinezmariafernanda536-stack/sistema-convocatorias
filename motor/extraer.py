@@ -295,6 +295,23 @@ def _hermanos_hasta(encabezado):
     return "".join(partes)
 
 
+def _bloque_propio(h, encabezados, terminos):
+    """El elemento más grande que contiene el encabezado `h` y ningún otro encabezado de otra convocatoria."""
+    def nombre(e):
+        return tx.normalizar(_limpiar_seccion(e.get_text(" ")))
+    propio = nombre(h)
+    otros = [e for e in encabezados if e is not h and nombre(e) != propio and tx.alguno(nombre(e), terminos)
+             and not _es_generico(nombre(e))]
+    ancestros = {id(e): {id(a) for a in e.parents} for e in otros}
+    bloque, actual = None, h
+    while actual.parent is not None and actual.parent.name not in ("body", "html", "[document]"):
+        padre = actual.parent
+        if any(id(padre) in a for a in ancestros.values()):
+            break
+        bloque = actual = padre
+    return bloque
+
+
 def secciones(html, url, terminos, minimo=2):
     """Devuelve [(título, ancla, html_de_la_sección)] si la página reúne varias convocatorias; [] si es una sola."""
     sopa = _sopa(html)
@@ -336,9 +353,29 @@ def secciones(html, url, terminos, minimo=2):
             agregar(titulo, d.get("id"), str(d))
     # 3. secciones con encabezado (h2–h4) seguidas de su contenido
     if len(salida) < minimo:
-        for h in sopa.find_all(["h2", "h3", "h4"]):
+        encabezados = sopa.find_all(["h2", "h3", "h4"])
+        mejores, orden = {}, []  # el mismo título puede repetirse (menú de pestañas, versión móvil): se usa el más completo
+        for h in encabezados:
             ancla = h.get("id") or (h.parent.get("id") if h.parent is not None and h.parent.name in ("section", "div", "article") else None)
-            agregar(h.get_text(" "), ancla, _hermanos_hasta(h))
+            propio = _hermanos_hasta(h)
+            bloque = _bloque_propio(h, encabezados, terminos)
+            # en páginas con pestañas internas («Requisitos», «Procesos y fechas»…) lo que sigue al título es solo la
+            # presentación: el bloque que lo contiene trae todas las pestañas, también las ocultas
+            if bloque is not None and len(bloque.get_text(" ")) > len(_sopa(propio).get_text(" ")) + 80:
+                propio = str(bloque)
+            clave = tx.normalizar(_limpiar_seccion(h.get_text(" ")))
+            largo = len(_sopa(propio).get_text(" "))
+            if clave not in mejores:
+                orden.append(clave)
+                mejores[clave] = [h.get_text(" "), ancla, propio, largo]
+            else:
+                m = mejores[clave]
+                m[1] = m[1] or ancla
+                if largo > m[3]:
+                    m[2], m[3] = propio, largo
+        for clave in orden:
+            titulo, ancla, propio, _ = mejores[clave]
+            agregar(titulo, ancla, propio)
     if len(salida) < minimo:
         return []
     return salida

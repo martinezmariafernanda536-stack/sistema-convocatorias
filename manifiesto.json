@@ -1,15 +1,15 @@
 {
- "version": "2026-11-23f",
+ "version": "2026-11-23h",
  "archivos": {
   "app.py": "39761826a233",
   "componentes.py": "c770b491e08a",
-  "mapeo.py": "1994633d82a2",
+  "mapeo.py": "e5c8db2274df",
   "tareas.py": "6c9b0d373a84",
   "ui.py": "b3106ad8e671",
   "motor/__init__.py": "da39a3ee5e6b",
   "motor/config.py": "65b54d98eb4d",
-  "motor/externo.py": "7ffa4e95aa14",
-  "motor/extraer.py": "17e4e31edd2d",
+  "motor/externo.py": "5d6e534b6b22",
+  "motor/extraer.py": "c8ea8944ec98",
   "motor/historial.py": "5d20dcf06a62",
   "motor/radar.py": "73e365c99f2f",
   "motor/red.py": "9823265fbbb8",
@@ -23,7 +23,7 @@
   "calidad/entrada.py": "c539b70fe1c3",
   "calidad/exportacion.py": "69e0d68a2f7d",
   "calidad/migracion.py": "bb6db5c0a7e5",
-  "calidad/reglas.py": "01bfce3e8df6",
+  "calidad/reglas.py": "75fb539486f9",
   "bandeja/__init__.py": "da39a3ee5e6b",
   "bandeja/almacen.py": "58f1665ed870",
   "bandeja/flujo.py": "264244f0f263",
@@ -39,7 +39,7 @@
   "paginas/cuenta.py": "a96901199ea8",
   "paginas/guia.py": "2bedf66a12c7",
   "paginas/inicio.py": "c693c6bdc9ca",
-  "paginas/mapeo.py": "bdf7f6bb9143",
+  "paginas/mapeo.py": "4be6bf574731",
   "paginas/tablero.py": "94e6c3556c39",
   "paginas/usuarios.py": "eb7f67680671"
  }

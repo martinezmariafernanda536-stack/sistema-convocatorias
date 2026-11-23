@@ -323,13 +323,24 @@ _VARIAS_FECHAS = re.compile(r"\b(dos|tres|diferentes|distintas|varias) fechas|se
                             r"nivel)|\b(rondas?|rounds?|convocatorias? de (oto[nñ]o|primavera)|depending|dependiendo)\b", re.I)
 
 
-def _coherencia_de_fechas(fila):
+def _coherencia_de_fechas(fila, hoy=None):
     """Si las observaciones de la fecha (el texto de la página) dicen otra fecha de cierre única, manda el texto."""
     try:
         from calidad.reglas import cierre_en_observaciones, fecha_incoherente
     except ImportError:  # archivos de paquetes distintos: se omite esta corrección en lugar de detener la búsqueda
         return
     obs = str(fila.get("Observaciones a la fecha límite de aplicación", ""))
+    perm = str(fila.get("¿La convocatoria es permanente?", "")).lower().startswith("s")
+    if not str(fila.get("Fecha Límite de Aplicación", "")).strip() and not perm:
+        # abre cada año en las mismas fechas y la página no dice el año: se toma el próximo cierre
+        from datetime import date as _date
+        from calidad.reglas import cierre_anual
+        prox = cierre_anual(fila, hoy or _date.today())
+        if prox:
+            fila["Fecha Límite de Aplicación"] = f"{prox.day}/{prox.month}/{prox.year}"
+            fila["[Sistema] Fecha corregida"] = (f"La página da las fechas de cada año sin el año; se tomó el próximo "
+                                                f"cierre: {prox:%d/%m/%Y}")
+            return
     if fecha_incoherente(fila) and not _VARIAS_FECHAS.search(obs):
         segun_texto = cierre_en_observaciones(fila)
         fila["[Sistema] Fecha corregida"] = (f"Gemini puso {fila.get('Fecha Límite de Aplicación')}; las observaciones "
@@ -431,7 +442,7 @@ def completar(fila, c, catalogos, cfg, texto_norm, modalidad, hoy=None):
             fila["¿La convocatoria es permanente?"] = "No"
         else:
             fila["Fecha Límite de Aplicación"] = ""
-    _coherencia_de_fechas(fila)
+    _coherencia_de_fechas(fila, hoy)
     obs = fila.get("Observaciones a la fecha límite de aplicación", "")
     if obs and not en_espanol(obs):
         fila["Observaciones a la fecha límite de aplicación"] = "Ver las condiciones de la fecha en la página oficial."

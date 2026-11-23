@@ -826,3 +826,54 @@ def test_fecha_limite_que_contradice_las_observaciones():
               "Existen diferentes fechas límite según la modalidad: hasta el 01/02/2027 para posgrado"}
     externo._coherencia_de_fechas(varias)
     assert varias["Fecha Límite de Aplicación"] == "1/12/2026"   # varias fechas: no se toca, queda la alerta para revisar
+
+
+def test_descarta_paginas_de_servicios_a_estudiantes_sin_gemini():
+    hoy = date(2026, 11, 22)
+    for t in ["Préstamos federales para estudiantes de posgrado", "Guías de Ayuda Financiera (Financial Aid Guides)",
+              "Conviértete en un compañero para los nuevos estudiantes internacionales"]:
+        assert programa.parece_no_convocatoria({"Nombre de la Convocatoria": t, "_url": "https://x.org/a"}, hoy)
+    for t in ["Becas de matrícula para estudiantes internacionales", "Ayuda financiera para estudiantes internacionales 2027",
+              "Beca de alojamiento y manutención para doctorandos — convocatoria abierta"]:
+        assert not programa.parece_no_convocatoria({"Nombre de la Convocatoria": t, "_url": "https://x.org/a"}, hoy)
+
+
+def test_prioridad_con_fecha_futura_antes_que_paginas_sin_fecha():
+    hoy = date(2026, 11, 23)
+    con_fecha = {"Nombre de la Convocatoria": "Call for Proposals", "Fecha Límite de Aplicación": "15/2/2027",
+                 "[Sistema] Elegibilidad Colombia": "Revisar", "_texto": "x" * 800}
+    sin_fecha = {"Nombre de la Convocatoria": "Ayuda financiera para estudiantes internacionales de posgrado",
+                 "[Sistema] Elegibilidad Colombia": "Elegible", "_texto": "x" * 3000}
+    assert programa.prioridad(con_fecha, hoy) > programa.prioridad(sin_fecha, hoy)
+
+
+def test_pestanas_internas_tec_trae_la_fecha_de_procesos_y_fechas():
+    """Tec: cada beca tiene pestañas internas («¿Es para mí?», «Requisitos», «Procesos y fechas»); la fecha de cierre
+    está en una pestaña oculta y debe llegar a la sección de esa beca."""
+    import argparse
+    from motor import config as C
+    from motor import reglas as RG
+    cfg = C.cargar()
+    fuente = C.Fuente(id="TEC2", activa=True, tipo="Universidad", nombre="Tecnológico de Monterrey", pais="México",
+                      dominio="https://tec.mx", url_becas="https://tec.mx/es/profesional/becas-pestanas", oficial="No Oficial",
+                      idioma="es", requiere_navegador=False, fila=0, modalidades=["Beca"])
+    args = argparse.Namespace(hoy=date(2026, 11, 23), prueba=str(PAGINAS), pausa=0, todas=False)
+
+    class SinIcetex:
+        def revisar(self, *a):
+            return False, ""
+    res = programa.revisar_fuente(fuente, cfg, args, SinIcetex(), RG.IndiceAirtable(None, 90))
+    por_url = {u: f for _, u, f, _ in res["hallazgos"]}
+    emp = por_url["https://tec.mx/es/profesional/becas-pestanas#beca-al-talento-emprendedor"]
+    assert emp["Fecha Límite de Aplicación"] == "16/2/2027"
+    assert por_url["https://tec.mx/es/profesional/becas-pestanas#beca-al-talento-artistico"]["Fecha Límite de Aplicación"] == "2/3/2027"
+
+
+def test_fechas_de_cada_ano_sin_ano_toman_el_proximo_cierre():
+    """TUM: «del 1 de enero al 31 de mayo para el semestre de invierno…» no dice el año: se toma el próximo cierre."""
+    from motor import externo
+    fila = {"Fecha Límite de Aplicación": "", "¿La convocatoria es permanente?": "No",
+            "Observaciones a la fecha límite de aplicación": "Las postulaciones se realizan del 1 de enero al 31 de mayo "
+            "para el semestre de invierno y del 1 de junio al 30 de noviembre para el de verano."}
+    externo._coherencia_de_fechas(fila, date(2026, 12, 5))
+    assert fila["Fecha Límite de Aplicación"] == "31/5/2027"

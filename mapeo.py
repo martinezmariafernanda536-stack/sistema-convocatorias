@@ -898,6 +898,13 @@ _NO_CONV_TITULO = re.compile(
     r"\b(informe de resultados|annual report|informe anual|newsletter|bolet[ií]n|webinar|podcast|entrevista|interview|"
     r"cohorte actual|current cohort|meet the|conoce a|about us|qui[eé]nes somos|our story|nuestra historia|"
     r"testimonios?|testimonials?)\b", re.I)
+# páginas de servicios a estudiantes que no son convocatorias (préstamos, guías, alojamiento, visas, seguros…)
+_NO_CONV_SERVICIOS = re.compile(
+    r"\b(pr[eé]stamos?|loans?|financial aid guides?|gu[ií]as? de (ayuda|financiaci)|ayuda financiera (general|federal)|"
+    r"federal student aid|convi[eé]rtete en (un |una )?(compa[nñ]er\w*|mentor\w*|voluntari\w*|buddy)|become a (buddy|mentor)|"
+    r"alojamiento|housing|seguro m[eé]dico|health insurance|visas? de estudiante|student visas?|orientation week|"
+    r"semana de orientaci[oó]n|student services|servicios (para|al) estudiantes?|directorio|directory|campus life|"
+    r"vida universitaria|how to pay|c[oó]mo pagar)\b", re.I)
 _LLAMADO = re.compile(r"\b(convocatoria|call for|apply|postula|applications? (are )?open|abiertas?|open call)\b", re.I)
 _NO_CONV_RUTA = re.compile(r"/(news|noticias|press|prensa|press-releases?|blog|stories|historias|events?|eventos|"
                            r"podcasts?|webinars?|winners|ganadores|finalists|about-us|acerca-de|"
@@ -915,6 +922,8 @@ def parece_no_convocatoria(fila, hoy):
     titulo = str(fila.get("Nombre de la Convocatoria", ""))
     if (m := _NO_CONV_TITULO.search(titulo)) and not _LLAMADO.search(titulo):
         return f"el título indica una noticia o un resultado («{m.group(0).strip()[:40]}»)"
+    if (m := _NO_CONV_SERVICIOS.search(titulo)) and not _LLAMADO.search(titulo):
+        return f"es una página de servicios a estudiantes («{m.group(0).strip()[:40]}»), no una convocatoria"
     from urllib.parse import urlparse
     ruta = urlparse(str(fila.get("_url", ""))).path
     if m := _NO_CONV_RUTA.search(ruta):
@@ -933,11 +942,13 @@ def prioridad(fila, hoy):
     p += {"Elegible": 3, "Probable": 1.5}.get(elig, 0)
     if str(fila.get("[Sistema] Duplicado en Airtable", "")).startswith("Nueva edición") or \
             fila.get("[Sistema] Estado") == "Nueva edición (seguimiento)":
-        p += 8  # edición nueva de una convocatoria que ya está en la base: se completa antes que cualquier otra
+        p += 10  # edición nueva de una convocatoria que ya está en la base: se completa antes que cualquier otra
     cierre = a_fecha(fila.get("Fecha Límite de Aplicación", ""))
     if cierre and cierre >= hoy:
         dias = (cierre - hoy).days
-        p += 3 + (1 if 7 <= dias <= 120 else 0)
+        # una fecha límite futura en la página es la mejor señal de que es una convocatoria abierta: pesa más que
+        # cualquier otra, para que estas se completen antes que las páginas sin fecha (listados, servicios, noticias)
+        p += 6 + (1 if 7 <= dias <= 120 else 0)
     elif str(fila.get("¿La convocatoria es permanente?", "")).lower().startswith("s"):
         p += 1.5
     from motor.extraer import nucleo
@@ -945,8 +956,11 @@ def prioridad(fila, hoy):
     if any(w in titulo for w in _ADMINISTRATIVAS):
         p -= 6  # matrícula, costos, empleo estudiantil, políticas, formularios: casi nunca son convocatorias
     propias = nucleo(fila.get("Nombre de la Convocatoria", "").split(" (")[0])
+    con_fecha = bool(cierre and cierre >= hoy)
     if not propias:
-        p -= 5  # «Call for Proposals», «Grants Calls», «Becas»: casi siempre una página de listado, no una convocatoria
+        # «Call for Proposals», «Grants Calls», «Becas»: casi siempre una página de listado; si trae una fecha límite
+        # futura, suele ser la convocatoria vigente del oferente, y se castiga menos
+        p -= 2 if con_fecha else 5
     elif len(propias) == 1:
         p -= 1
     largo = len(str(fila.get("_texto", "")))
@@ -997,11 +1011,22 @@ def _enviar(cfg, filas, origen, almacen, ya, flujo, guardar_incompletas=True):
     return res
 
 
-def _texto_de_la_pagina(lector, url):
-    from motor.extraer import _sopa, _texto_visible
+def _texto_de_la_pagina(lector, url, terminos=None):
+    """Texto de la página para Gemini. Si el enlace apunta a una sección (#ancla) de una página con varias
+    convocatorias, solo el texto de esa sección (con la información general de la página)."""
+    from motor import extraer
     import unicodedata
-    r = lector.leer(url)
-    return unicodedata.normalize("NFC", _texto_visible(_sopa(r.html)))[:12000] if r.ok else ""
+    base_url, _, ancla = str(url).partition("#")
+    r = lector.leer(base_url)
+    if not r.ok:
+        return ""
+    if ancla and terminos:
+        for titulo, a, contenido in extraer.secciones(r.html, r.url, terminos):
+            if a == ancla:
+                texto = titulo + ". " + extraer._texto_visible(extraer._sopa(contenido))
+                ctx = extraer.contexto_general(r.html, terminos)
+                return unicodedata.normalize("NFC", texto + ("\n\nInformación general de la página: " + ctx if ctx else ""))[:12000]
+    return unicodedata.normalize("NFC", extraer._texto_visible(extraer._sopa(r.html)))[:12000]
 
 
 def limpiar_bandeja(almacen, hoy=None):
@@ -1084,7 +1109,7 @@ def completar_pendientes(cfg, args, hoy=None, maximo=None):
         fila["_texto"] = item["meta"].get("texto_pagina", "")
         if not fila["_texto"] and str(fila.get("Cómo aplicar", "")).startswith("http"):
             lector = lector or crear_lector(cfg, args)
-            fila["_texto"] = _texto_de_la_pagina(lector, fila["Cómo aplicar"])
+            fila["_texto"] = _texto_de_la_pagina(lector, fila["Cómo aplicar"], cfg.palabras_de(["Beca", "Subvención", "Cooperación técnica", "Premio"]))
         fila["[Sistema] Estado"] = "Nueva"
         if fila["_texto"]:
             externo.completar_mapeo([fila], cfg, CATALOGOS, hoy, maximo=1)
@@ -1319,7 +1344,7 @@ def externo_reiniciar():
 
 
 # ---------------------------------------------------------------------------
-VERSION = "2026-11-23f"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
+VERSION = "2026-11-23h"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
 
 
 class _Argumentos(argparse.ArgumentParser):
