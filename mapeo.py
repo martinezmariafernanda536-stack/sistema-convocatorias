@@ -59,7 +59,9 @@ def crear_lector(cfg, args):
 import threading  # noqa: E402
 
 ALMACEN = None                 # base compartida con la aplicación (si no, se abre una)
-DETENER = threading.Event()    # la aplicación lo activa con el botón «Detener»
+import builtins as _b  # noqa: E402
+# la aplicación lo activa con el botón «Detener»; vive fuera del módulo para que siga sirviendo si el módulo se recarga
+DETENER = _b.__dict__.setdefault("_mapeo_detener", threading.Event())
 AL_GUARDAR = None              # función(tipo, ruta): la aplicación guarda el avance (config, historial) en la base
 
 
@@ -705,6 +707,7 @@ def mapear(cfg, args):
 
     # 3. completar (traducir con Gemini) y guardar solo lo que quede completo, hasta llegar a la meta
     consultas, motivo_fin, no_conv = 0, "", {}
+    sin_exito, ultimo_conteo, sin_consultar = 0, 0, 0
     for k, fila in enumerate(elegidas, 1):
         if DETENER.is_set():
             log.warning("Detenido: lo completado hasta aquí ya quedó guardado.")
@@ -720,7 +723,18 @@ def mapear(cfg, args):
                         externo.SUSPENDIDO["motivo"][:200], len(elegidas) - k + 1)
             motivo_fin = "Gemini dejó de responder: " + externo.SUSPENDIDO["motivo"][:160]
             break
+        if usar_gemini and sin_exito >= 30:
+            motivo_fin = ("30 consultas seguidas no trajeron ninguna convocatoria completa: las candidatas que quedan son poco "
+                          "prometedoras (noticias, listados, páginas sin fecha). Se detuvo para no gastar el cupo de Gemini")
+            break
         url, fuente_id = fila["_url"], fila["_fuente"]
+        if (razon := parece_no_convocatoria(fila, hoy)):
+            historial.registrar(url, fuente_id, fila, hoy.isoformat())
+            fila["[Sistema] Resultado"] = "Descartada al leerla"
+            descartadas.append(("No es una convocatoria (sin consultar a Gemini): " + razon, fila["Nombre de la Convocatoria"],
+                                url, fuente_id))
+            sin_consultar += 1
+            continue
         if no_conv.get(fuente_id, 0) >= 3:  # esa fuente solo devuelve menús o páginas generales: no gastar más consultas
             fila["[Sistema] Resultado"] = "Para la próxima búsqueda (su fuente devolvió páginas sin convocatoria)"
             continue
@@ -733,6 +747,8 @@ def mapear(cfg, args):
         intento_gemini = False
         if usar_gemini:
             consultas += 1
+            sin_exito = 0 if CONTEO["bandeja"] > ultimo_conteo else sin_exito + 1
+            ultimo_conteo = CONTEO["bandeja"]
             intento_gemini = externo.completar_mapeo([fila], cfg, CATALOGOS, hoy, maximo=1) > 0
             if not intento_gemini and externo.SUSPENDIDO["motivo"]:
                 fila["[Sistema] Resultado"] = "Para la próxima búsqueda (Gemini no respondió)"
@@ -780,6 +796,9 @@ def mapear(cfg, args):
         _avisar("historial", historial.ruta)
         log.info("  Completas {%d de %d} · consultas a Gemini %d · resultado: a la bandeja %d · por completar %d",
                  min(CONTEO["bandeja"], meta), meta, consultas, CONTEO["bandeja"], CONTEO["por_completar"])
+    if sin_consultar:
+        log.info("%d candidatas se descartaron sin gastar consultas a Gemini (noticias, ganadores, resultados o ediciones "
+                 "pasadas).", sin_consultar)
     if CONTEO["bandeja"] < meta and not getattr(args, "sin_bandeja", False):
         motivo_fin = motivo_fin or ("no había más candidatas nuevas en las fuentes" if usar_gemini else
                                     "Gemini está apagado: solo pasa lo que ya está en español y completo")
@@ -854,6 +873,37 @@ _ADMINISTRATIVAS = ("tuition", "fees", "cost calculator", "calculadora", "studen
                     "política", "politica", "matrícula", "matricula", "tarifas", "how to pay", "refund", "faq",
                     "preguntas frecuentes", "contact", "contacto", "news", "noticias", "events", "eventos", "terms and conditions",
                     "términos y condiciones", "privacy", "privacidad", "login", "apply now", "admissions")
+
+
+_NO_CONV_TITULO = re.compile(
+    r"\b(winners?|ganador(?:es|as?)?|finalists?|finalistas|announces?|anuncia|recibe|receives|awarded|premiad[oa]s|"
+    r"celebrates|congratulat\w*|felicita\w*|resultados|results|informe de resultados|annual report|informe anual|"
+    r"newsletter|bolet[ií]n|webinar|podcast|entrevista|interview|cohorte actual|current cohort|meet the|conoce a|"
+    r"about us|acerca de|qui[eé]nes somos|our story|nuestra historia|testimonios?|testimonials?)\b", re.I)
+_NO_CONV_RUTA = re.compile(r"/(news|noticias|press|prensa|press-releases?|blog|stories|historias|events?|eventos|media|"
+                           r"podcasts?|webinars?|results|resultados|winners|ganadores|finalists|about|about-us|acerca|"
+                           r"quienes-somos|annual-report|informe-anual|testimonials)(/|$)", re.I)
+
+
+def parece_no_convocatoria(fila, hoy):
+    """Noticias, ganadores, resultados, informes o ediciones de años pasados: se descartan sin gastar una consulta.
+
+    Solo si la página no trae una fecha límite futura (una convocatoria abierta nunca se descarta por el título)."""
+    from calidad.reglas import fecha as a_fecha
+    cierre = a_fecha(fila.get("Fecha Límite de Aplicación", ""))
+    if cierre and cierre >= hoy:
+        return ""
+    titulo = str(fila.get("Nombre de la Convocatoria", ""))
+    if m := _NO_CONV_TITULO.search(titulo):
+        return f"el título indica una noticia o un resultado («{m.group(0)}»)"
+    from urllib.parse import urlparse
+    ruta = urlparse(str(fila.get("_url", ""))).path
+    if m := _NO_CONV_RUTA.search(ruta):
+        return f"la página está en la sección «{m.group(1)}» del sitio (noticias, eventos o resultados)"
+    anos = [int(a) for a in re.findall(r"(?<!\d)(20\d\d)(?!\d)", titulo)]
+    if anos and max(anos) < hoy.year:
+        return f"es de una edición pasada ({max(anos)})"
+    return ""
 
 
 def prioridad(fila, hoy):
@@ -1250,7 +1300,7 @@ def externo_reiniciar():
 
 
 # ---------------------------------------------------------------------------
-VERSION = "2026-11-22e"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
+VERSION = "2026-11-23c"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
 
 
 class _Argumentos(argparse.ArgumentParser):

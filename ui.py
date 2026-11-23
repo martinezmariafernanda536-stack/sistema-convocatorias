@@ -62,9 +62,11 @@ ESTILOS = f"""<style>
  .stTabs [aria-selected="true"] {{color:var(--azul)!important; font-weight:700; background:#eef4fd}}
  .stTabs [data-baseweb="tab-highlight"] {{background:var(--azul); height:3px}}
  /* botones: el principal en azul institucional, aunque falte el archivo de tema */
- button[kind="primary"], [data-testid="stBaseButton-primary"] {{background:linear-gradient(90deg,var(--navy),#1b4f8f)!important;
+ button[kind^="primary"], [data-testid^="stBaseButton-primary"] {{background:linear-gradient(90deg,var(--navy),#1b4f8f)!important;
      border:0!important; color:#fff!important; box-shadow:0 2px 6px rgba(11,37,69,.18)}}
- button[kind="primary"]:hover, [data-testid="stBaseButton-primary"]:hover {{filter:brightness(1.12)}}
+ button[kind^="primary"]:hover, [data-testid^="stBaseButton-primary"]:hover {{filter:brightness(1.12)}}
+ /* etiquetas de los filtros (las «píldoras» de las listas de selección) */
+ [data-baseweb="tag"] {{background:var(--navy)!important}}
  button[kind="secondary"]:hover, [data-testid="stBaseButton-secondary"]:hover {{border-color:var(--azul)!important;
      color:var(--azul)!important}}
  [data-testid="stPageLink"] a {{border-radius:8px}}

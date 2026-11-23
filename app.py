@@ -253,4 +253,11 @@ with st.sidebar:
         st.rerun()
     st.caption("¿Primera vez? Abre **Cómo se usa** en el menú.")
 
+# si el servidor se reinició a mitad de una búsqueda (al subir archivos a GitHub, por ejemplo), se reanuda sola una vez
+try:
+    import tareas
+    tareas.reanudar_si_se_corto(ui.almacen())
+except Exception:  # noqa: BLE001 - nunca impide abrir la app
+    pass
+
 st.navigation(paginas).run()

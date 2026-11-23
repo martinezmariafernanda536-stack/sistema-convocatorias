@@ -87,6 +87,10 @@ def panel_ejecucion():
         with st.container(border=True):
             c1, c2 = st.columns([4, 1])
             c1.markdown(f"**⏳ {t.etiqueta}** · lleva {t.minutos()} min · la inició {t.usuario}")
+            if getattr(t, "reanudada", False):
+                c1.caption("Se cortó porque el servidor se reinició y **se reanudó sola**; no repite lo que ya está en el sistema.")
+            c1.caption("Mientras corre, no subas archivos a GitHub ni reinicies la app: eso reinicia el servidor y corta la "
+                       "búsqueda (se reanuda sola una vez).")
             if c2.button("Detener", key="detener", width="stretch", icon=":material/stop:"):
                 tareas.detener()
             hechas, total, enviadas, pend, k, n = progreso(t.lineas)
@@ -155,7 +159,7 @@ def revisar_version():
     faltan = []
     try:
         import mapeo as programa
-        if getattr(programa, "VERSION", "") < "2026-11-22e":
+        if getattr(programa, "VERSION", "") < "2026-11-23c":
             faltan.append("mapeo.py")
         if importlib.util.find_spec("motor.radar") is None:
             faltan.append("motor/radar.py")

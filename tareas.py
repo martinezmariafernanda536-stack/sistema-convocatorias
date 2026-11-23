@@ -16,13 +16,17 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parent
 CFG = "configuracion_mapeo_becas.xlsx"
 REGISTRO = "tarea_actual.json"
-_candado = threading.Lock()
-_actual = None
+# El estado vive fuera del módulo: si Streamlit vuelve a cargar los archivos (por ejemplo, tras traer cambios de GitHub),
+# el módulo se recarga pero la búsqueda que ya corre en su hilo sigue siendo la misma y no se lanza otra encima.
+import builtins as _b  # noqa: E402
+_ESTADO = _b.__dict__.setdefault("_tareas_convocatorias", {"actual": None, "candado": threading.Lock()})
+_candado = _ESTADO["candado"]
 
 
 class Tarea:
-    def __init__(self, comando, etiqueta, usuario):
+    def __init__(self, comando, etiqueta, usuario, extra=(), reanudada=False):
         self.comando, self.etiqueta, self.usuario = comando, etiqueta, usuario
+        self.extra, self.reanudada = list(extra), reanudada
         self.inicio, self.fin = time.time(), None
         self.estado = "En curso"
         self.lineas = []
@@ -32,7 +36,7 @@ class Tarea:
         return {"comando": self.comando, "etiqueta": self.etiqueta, "usuario": self.usuario, "estado": self.estado,
                 "inicio": datetime.fromtimestamp(self.inicio).strftime("%Y-%m-%d %H:%M"),
                 "fin": datetime.fromtimestamp(self.fin).strftime("%Y-%m-%d %H:%M") if self.fin else "",
-                "log": self.lineas[-80:]}
+                "extra": self.extra, "reanudada": self.reanudada, "log": self.lineas[-80:]}
 
     def minutos(self):
         return int(((self.fin or time.time()) - self.inicio) // 60)
@@ -49,11 +53,15 @@ class _AlRegistro(logging.Handler):
 
 
 def actual():
-    return _actual
+    return _ESTADO["actual"]
 
 
 def en_curso():
-    return _actual is not None and _actual.estado == "En curso" and _actual.hilo is not None and _actual.hilo.is_alive()
+    t = _ESTADO["actual"]
+    if t is not None and t.estado == "En curso" and t.hilo is not None and t.hilo.is_alive():
+        return True
+    # red de seguridad: cualquier hilo de búsqueda vivo en el servidor cuenta como «en curso»
+    return any(h.name.startswith("tarea-") and h.is_alive() for h in threading.enumerate())
 
 
 def interrumpida(almacen):
@@ -67,6 +75,35 @@ def interrumpida(almacen):
     return reg if reg.get("estado") == "En curso" else None
 
 
+REANUDABLES = ("mapear", "descubrir", "completar-pendientes")
+
+
+def reanudar_si_se_corto(almacen, config=None):
+    """Si el servidor se reinició a mitad de una búsqueda (por ejemplo, al subir archivos a GitHub), la vuelve a lanzar sola
+    una vez, con las mismas opciones. No repite trabajo: lo que ya llegó a la bandeja o ya se leyó queda registrado.
+    Devuelve el registro de la búsqueda cortada si la reanudó."""
+    reg = interrumpida(almacen)
+    if not reg or reg.get("reanudada") or reg.get("comando") not in REANUDABLES:
+        return None
+    try:
+        hace = (datetime.now() - datetime.strptime(reg.get("inicio", ""), "%Y-%m-%d %H:%M")).total_seconds() / 3600
+    except ValueError:
+        return None
+    if hace > 6:  # muy antigua: mejor que la persona decida
+        return None
+    if config is None:
+        config = almacen.leer_archivo(CFG) or (RAIZ / "config" / CFG).read_bytes()
+        try:
+            from motor.config import completar_con_paquete
+            config = completar_con_paquete(config, RAIZ / "config" / CFG)
+        except Exception:  # noqa: BLE001
+            pass
+    etiqueta = str(reg.get("etiqueta", "Búsqueda")).replace(" (reanudada)", "") + " (reanudada)"
+    if iniciar(almacen, reg["comando"], etiqueta, reg.get("extra", []), reg.get("usuario", ""), config, reanudada=True):
+        return reg
+    return None
+
+
 def _guardar_registro(almacen, tarea):
     try:
         almacen.guardar_archivo(REGISTRO, json.dumps(tarea.resumen(), ensure_ascii=False).encode("utf-8"))
@@ -74,14 +111,13 @@ def _guardar_registro(almacen, tarea):
         pass
 
 
-def iniciar(almacen, comando, etiqueta, extra, usuario, config):
+def iniciar(almacen, comando, etiqueta, extra, usuario, config, reanudada=False):
     """Arranca la ejecución en segundo plano. Devuelve False si ya hay una en curso."""
-    global _actual
     with _candado:
         if en_curso():
             return False
-        tarea = Tarea(comando, etiqueta, usuario)
-        _actual = tarea
+        tarea = Tarea(comando, etiqueta, usuario, extra, reanudada)
+        _ESTADO["actual"] = tarea
         tarea.hilo = threading.Thread(target=_correr, args=(almacen, tarea, list(extra), config), daemon=True,
                                       name=f"tarea-{comando}")
         tarea.hilo.start()
@@ -120,7 +156,8 @@ def detener():
     import mapeo as programa
     if en_curso():
         programa.DETENER.set()
-        _actual.lineas.append(f"{datetime.now():%H:%M} Deteniendo… se termina lo que está en curso y se guarda lo avanzado.")
+        if _ESTADO["actual"] is not None:
+            _ESTADO["actual"].lineas.append(f"{datetime.now():%H:%M} Deteniendo… se termina lo que está en curso y se guarda lo avanzado.")
 
 
 def _correr(almacen, tarea, extra, config):

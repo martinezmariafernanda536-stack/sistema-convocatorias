@@ -772,3 +772,17 @@ def test_seguimiento_lee_el_enlace_dentro_del_texto_y_prueba_el_ano_siguiente(tm
     urls = [u for _, l in sel.values() for u, _ in l]
     assert urls == ["https://www.fundacioncarolina.es/convocatoria-de-becas-2026-2027/",
                     "https://www.fundacioncarolina.es/convocatoria-de-becas-2027-2028/"]
+
+
+def test_descarta_noticias_y_ganadores_sin_gemini():
+    hoy = date(2026, 11, 22)
+    no = [{"Nombre de la Convocatoria": "Premio Earthshot 2022: Kheyti (2022 Earthshot Prize Winner)", "_url": "https://x.org/a"},
+          {"Nombre de la Convocatoria": "Becca Heller Recibe Beca MacArthur", "_url": "https://x.org/b"},
+          {"Nombre de la Convocatoria": "Programa de becas", "_url": "https://x.org/news/2026/programa"},
+          {"Nombre de la Convocatoria": "Becas IILA-MAECI 2025", "_url": "https://x.org/becas"}]
+    si = [{"Nombre de la Convocatoria": "Becas Chevening 2027-2028", "_url": "https://chevening.org/scholarships"},
+          {"Nombre de la Convocatoria": "Premio a ganadores de ideas 2025", "_url": "https://x.org/p",
+           "Fecha Límite de Aplicación": "1/3/2027"},                       # con fecha futura nunca se descarta
+          {"Nombre de la Convocatoria": "British Council Scholarships for Women in STEM", "_url": "https://x.org/s"}]
+    assert all(programa.parece_no_convocatoria(f, hoy) for f in no)
+    assert not any(programa.parece_no_convocatoria(f, hoy) for f in si)

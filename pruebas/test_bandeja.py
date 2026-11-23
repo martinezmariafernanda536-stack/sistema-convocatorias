@@ -772,3 +772,48 @@ def test_completar_a_mano_restaurar_y_recuperar_anuladas(almacen):
     assert len(almacen.items("Por completar")) == 1 and F.anuladas(almacen) == []
     rec = almacen.items("Por completar")[0]
     assert rec["historial"][-1]["accion"] == "Recuperada de anuladas"
+
+
+def test_busqueda_cortada_por_reinicio_se_reanuda_una_vez(almacen, monkeypatch):
+    import json
+    import tareas
+    from datetime import datetime
+    lanzadas = []
+    monkeypatch.setattr(tareas, "iniciar", lambda A, c, e, x, u, cfg, reanudada=False: lanzadas.append((c, e, x, reanudada)) or True)
+    reg = {"comando": "mapear", "etiqueta": "Búsqueda de convocatorias", "usuario": "Natalia", "estado": "En curso",
+           "inicio": datetime.now().strftime("%Y-%m-%d %H:%M"), "extra": ["--maximo-nuevas", "20"], "reanudada": False}
+    almacen.guardar_archivo(tareas.REGISTRO, json.dumps(reg).encode())
+    assert tareas.reanudar_si_se_corto(almacen, b"cfg")
+    assert lanzadas == [("mapear", "Búsqueda de convocatorias (reanudada)", ["--maximo-nuevas", "20"], True)]
+    # si la reanudada también se corta, no se relanza otra vez (nunca queda en un ciclo)
+    almacen.guardar_archivo(tareas.REGISTRO, json.dumps(reg | {"reanudada": True}).encode())
+    assert tareas.reanudar_si_se_corto(almacen, b"cfg") is None
+    # una antigua (más de 6 horas) tampoco: decide la persona
+    almacen.guardar_archivo(tareas.REGISTRO, json.dumps(reg | {"inicio": "2026-01-01 08:00"}).encode())
+    assert tareas.reanudar_si_se_corto(almacen, b"cfg") is None
+
+
+def test_recargar_el_modulo_no_pierde_la_busqueda_en_curso(almacen):
+    """Si Streamlit vuelve a cargar los archivos mientras corre una búsqueda, no debe creer que se cortó ni lanzar otra."""
+    import importlib
+    import json
+    import sys
+    import threading
+    import tareas
+    from datetime import datetime
+    sigue = threading.Event()
+    hilo = threading.Thread(target=sigue.wait, name="tarea-mapear", daemon=True)
+    hilo.start()
+    t = tareas.Tarea("mapear", "Búsqueda", "Natalia")
+    t.hilo = hilo
+    tareas._ESTADO["actual"] = t
+    almacen.guardar_archivo(tareas.REGISTRO, json.dumps(t.resumen()).encode())
+    del sys.modules["tareas"]
+    nuevo = importlib.import_module("tareas")
+    try:
+        assert nuevo.en_curso() and nuevo.interrumpida(almacen) is None
+        assert nuevo.reanudar_si_se_corto(almacen, b"cfg") is None
+    finally:
+        sigue.set()
+        hilo.join(5)
+        nuevo._ESTADO["actual"] = None

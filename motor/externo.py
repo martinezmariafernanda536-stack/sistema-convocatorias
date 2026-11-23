@@ -319,6 +319,21 @@ def _lista(valor, permitidos, maximo=None):
     return salida[:maximo] if maximo else salida
 
 
+_VARIAS_FECHAS = re.compile(r"\b(dos|tres|diferentes|distintas|varias) fechas|seg[uú]n (la |el )?(modalidad|categor|programa|"
+                            r"nivel)|\b(rondas?|rounds?|convocatorias? de (oto[nñ]o|primavera)|depending|dependiendo)\b", re.I)
+
+
+def _coherencia_de_fechas(fila):
+    """Si las observaciones de la fecha (el texto de la página) dicen otra fecha de cierre única, manda el texto."""
+    from calidad.reglas import cierre_en_observaciones, fecha_incoherente
+    obs = str(fila.get("Observaciones a la fecha límite de aplicación", ""))
+    if fecha_incoherente(fila) and not _VARIAS_FECHAS.search(obs):
+        segun_texto = cierre_en_observaciones(fila)
+        fila["[Sistema] Fecha corregida"] = (f"Gemini puso {fila.get('Fecha Límite de Aplicación')}; las observaciones "
+                                            f"dicen {segun_texto:%d/%m/%Y}")
+        fila["Fecha Límite de Aplicación"] = f"{segun_texto.day}/{segun_texto.month}/{segun_texto.year}"
+
+
 def completar(fila, c, catalogos, cfg, texto_norm, modalidad, hoy=None):
     """Llena con la propuesta de Gemini los campos que no se pudieron sacar de la página.
 
@@ -413,6 +428,7 @@ def completar(fila, c, catalogos, cfg, texto_norm, modalidad, hoy=None):
             fila["¿La convocatoria es permanente?"] = "No"
         else:
             fila["Fecha Límite de Aplicación"] = ""
+    _coherencia_de_fechas(fila)
     obs = fila.get("Observaciones a la fecha límite de aplicación", "")
     if obs and not en_espanol(obs):
         fila["Observaciones a la fecha límite de aplicación"] = "Ver las condiciones de la fecha en la página oficial."
