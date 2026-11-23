@@ -630,6 +630,8 @@ def test_radar_lee_el_agregador_y_registra_solo_la_pagina_oficial():
     assert nueva["Nombre de la Fuente"] == "Fundación Ejemplo"                 # nombre tomado del sitio oficial
     assert nueva["Fecha Límite de Aplicación"] == "15/3/2027"
     assert "Opportunity Desk" in nueva["[Sistema] Página donde se encontró"]
+    assert nueva["Link de la Fuente Oferente"].startswith("https://")      # enlace válido del oferente nuevo
+    assert not any("interfolio" in u or u.endswith("/login") for u in por_url)  # postulación e inicio de sesión: no
     # si el sitio oficial ya es una fuente, se usa esa fuente (con su actor y su carácter oficial)
     assert por_url["https://www.uu.nl/en/scholarships/utrecht-excellence-scholarships"]["[Sistema] Fuente ID"] == "UNI-NL-01"
     # las publicaciones quedan anotadas para no volver a abrirlas
@@ -703,3 +705,70 @@ def test_configuracion_guardada_recibe_hojas_y_parametros_nuevos(tmp_path):
     assert wb2["Fuentes"]["D2"].value == "Fuente editada por el administrador"
     assert "Publicaciones a revisar por agregador" in {r[0].value for r in wb2["Parametros"].iter_rows(min_row=2)}
     assert C.completar_con_paquete(nuevo) == nuevo   # si ya está completa, no se toca
+
+
+def test_completar_a_mano_pasa_a_por_revisar(tmp_path, monkeypatch):
+    from bandeja import flujo
+    from bandeja.almacen import AlmacenSQLite
+    A = AlmacenSQLite(tmp_path / "b.db")
+    datos = {"Nombre de la Convocatoria": "Beca de prueba", "Modalidad": "Beca"}
+    item = flujo.ingresar(A, datos, "Descubrimiento fuera de las fuentes · RAD-x.org", "Sistema",
+                          {"faltantes": ["Fecha Límite de Aplicación: vacía"]}, estado="Por completar")
+    item = A.items("Por completar")[0]
+    flujo.pasar_a_revision(A, item, datos | {"Fecha Límite de Aplicación": "1/3/2027"}, "Natalia")
+    (r,) = A.items("Por revisar")
+    assert r["datos"]["Fecha Límite de Aplicación"] == "1/3/2027" and "faltantes" not in r["meta"]
+    assert flujo.tocada_por_persona(r)          # la limpieza automática ya no la devuelve
+    assert A.items("Por completar") == []
+
+
+def test_seguimiento_por_temporada_y_tablero(tmp_path):
+    """Las que se repiten: en su temporada se revisan cada 14 días; el tablero dice qué pasó con cada una."""
+    from motor.historial import Historial
+    hoy = date(2026, 11, 22)
+    base = [
+        {"Nombre de la Convocatoria": "Becas de Doctorado Fundación Carolina", "Nombre de la Fuente": "Fundación Carolina",
+         "Cómo aplicar": "https://www.fundacioncarolina.es/becas/doctorado", "Fecha Límite de Aplicación": "10/2/2026"},
+        {"Nombre de la Convocatoria": "Premio de verano", "Cómo aplicar": "https://x.org/premio",
+         "Fecha Límite de Aplicación": "15/7/2026"},                                    # fuera de temporada
+        {"Nombre de la Convocatoria": "Beca sin enlace", "Fecha Límite de Aplicación": "1/3/2026"},
+        {"Nombre de la Convocatoria": "Beca Chevening", "Cómo aplicar": "https://chevening.org/scholarships",
+         "Fecha Límite de Aplicación": "5/11/2026"},
+    ]
+    h = Historial(tmp_path / "h.json")
+    sel = programa.ediciones_a_seguir(base, [], h, hoy, limite=1)
+    assert [u for _, l in sel.values() for u, _ in l] in (["https://www.fundacioncarolina.es/becas/doctorado"],
+                                                       ["https://chevening.org/scholarships"])
+    h.marcar_seguida("https://www.fundacioncarolina.es/becas/doctorado", "2026-11-01")   # hace 21 días: toca de nuevo
+    h.marcar_seguida("https://x.org/premio", "2026-11-01")                               # fuera de temporada: aún no
+    urls = {u for _, l in programa.ediciones_a_seguir(base, [], h, hoy, 10).values() for u, _ in l}
+    assert "https://www.fundacioncarolina.es/becas/doctorado" in urls and "https://x.org/premio" not in urls
+    # la edición nueva de Chevening ya llegó (otro enlace, mismo nombre)
+    items = [{"estado": "Por revisar", "ingreso": "2026-11-20", "origen": "Mapeo automático",
+              "datos": {"Nombre de la Convocatoria": "Beca Chevening 2027-2028", "Fecha Límite de Aplicación": "4/11/2027",
+                        "Cómo aplicar": "https://chevening.org/scholarship-2027"}}]
+    tab = {f["Convocatoria"]: f["Estado"] for f in programa.estado_seguimiento(base, items, h.seguidas, hoy)}
+    assert tab["Beca Chevening"] == "Edición nueva ya en el sistema"
+    assert tab["Becas de Doctorado Fundación Carolina"] == "Revisada: aún sin edición nueva"
+    assert tab["Beca sin enlace"] == "Sin página oficial para seguirla"
+    assert tab["Premio de verano"] == "Revisada: aún sin edición nueva"
+
+
+def test_prioridad_de_nueva_edicion():
+    hoy = date(2026, 11, 22)
+    comun = {"Nombre de la Convocatoria": "Becas Fundación Carolina de doctorado", "Fecha Límite de Aplicación": "1/3/2027",
+             "[Sistema] Elegibilidad Colombia": "Elegible", "_texto": "x" * 2000}
+    nueva = comun | {"[Sistema] Duplicado en Airtable": "Nueva edición: ya se registró la de 2026"}
+    assert programa.prioridad(nueva, hoy) > programa.prioridad(comun, hoy) + 5
+
+
+def test_seguimiento_lee_el_enlace_dentro_del_texto_y_prueba_el_ano_siguiente(tmp_path):
+    from motor.historial import Historial
+    base = [{"Nombre de la Convocatoria": "Becas de la Fundación Carolina 2026 - 2027", "Nombre de la Fuente": "Fundación Carolina",
+             "Cómo aplicar": "Debe ingresar a la página oficial en el link "
+                             "https://www.fundacioncarolina.es/convocatoria-de-becas-2026-2027/",
+             "Fecha Límite de Aplicación": "2/3/2026"}]
+    sel = programa.ediciones_a_seguir(base, [], Historial(tmp_path / "h.json"), date(2026, 11, 22))
+    urls = [u for _, l in sel.values() for u, _ in l]
+    assert urls == ["https://www.fundacioncarolina.es/convocatoria-de-becas-2026-2027/",
+                    "https://www.fundacioncarolina.es/convocatoria-de-becas-2027-2028/"]

@@ -42,7 +42,8 @@ CAT = Catalogo.desde_filas(catalogo_filas)
 BASE = leer_base()
 nombres_actores = sorted(f["nombre"] for f in catalogo_filas)
 actor_por_nombre = {f["nombre"]: f for f in catalogo_filas}
-por_estado = {e: [i for i in items if i["estado"] == e] for e in ("Por revisar", "Actor pendiente de crear", "Aprobada", "Descartada")}
+por_estado = {e: [i for i in items if i["estado"] == e]
+              for e in ("Por revisar", "Por completar", "Actor pendiente de crear", "Aprobada", "Descartada")}
 
 with st.sidebar:
     st.divider()
@@ -61,15 +62,19 @@ st.caption("Aquí llega todo lo que encuentra la búsqueda y lo que se registra 
            "lo revise y lo apruebe.")
 
 n_actores_pend = sum(1 for f in catalogo_filas if f["estado_ciclope"] != "Creado en CICLOPE")
-t_rev, t_act, t_reg, t_pub, t_desc, t_cat = st.tabs([
-    f"Por revisar ({len(por_estado['Por revisar'])})",
+t_rev, t_comp, t_act, t_reg, t_pub, t_desc, t_cat = st.tabs([
+    f"Por revisar ({len(por_estado['Por revisar'])})", f"Por completar ({len(por_estado['Por completar'])})",
     f"Actores pendientes ({n_actores_pend} · {len(por_estado['Actor pendiente de crear'])} en espera)",
     "Registrar convocatoria", f"En la base ({len(por_estado['Aprobada'])})", f"Descartadas ({len(por_estado['Descartada'])})",
     "Catálogo de actores"])
 
 def _origen(i):
     o = i["origen"]
-    return ("Búsqueda con Gemini" if o.startswith("Búsqueda externa") else "Mapeo automático" if o.startswith("Mapeo")
+    if o.startswith("Descubrimiento") or "· RAD-" in o:
+        return "Descubierta fuera de las fuentes"
+    if o.startswith("Mapeo automático · nueva edición") or "· SEG-" in o:
+        return "Seguimiento de ediciones"
+    return ("Mapeo automático" if o.startswith("Mapeo") or o.startswith("Búsqueda externa")
             else "Airtable" if ("Airtable" in o or "Migración" in o) else "Registro manual")
 
 
@@ -92,12 +97,41 @@ def _fila_triaje(i, hoy):
             "Llegó": i["ingreso"][:10], "Página": d.get("Cómo aplicar", "") if str(d.get("Cómo aplicar", "")).startswith("http") else None}
 
 
-with t_rev:
-    todas = por_estado["Por revisar"]
+ORIGENES = ["Mapeo automático", "Seguimiento de ediciones", "Descubierta fuera de las fuentes", "Registro manual", "Airtable"]
+
+
+def kpis(zona, v, tabla, hoy, completar):
+    """Cifras de la parte de arriba: se calculan sobre lo filtrado y dicen de cuántas en total."""
+    dias = lambda df, si_vacio: df["Días"].fillna(si_vacio)  # noqa: E731
+    hace7 = (hoy - pd.Timedelta(days=7)).isoformat()
+    filtrado = len(v) != len(tabla)
+    with zona:
+        k = st.columns(5)
+        for col, (n, lab) in zip(k, [
+                (len(v), ("por completar" if completar else "por revisar") + (f" (de {len(tabla)})" if filtrado else "")),
+                (int(((v["Origen"] != "Airtable") & (v["Llegó"] >= hace7)).sum()), "llegaron en los últimos 7 días"),
+                (int(((dias(v, -1) >= 0) & (dias(v, -1) <= 30)).sum()), "cierran en 30 días o menos"),
+                (int((v["Errores"] == 0).sum()), "sin nada en rojo" if completar else "completas, listas para aprobar"),
+                (int((v["Origen"] == "Descubierta fuera de las fuentes").sum()), "descubiertas fuera de las fuentes")]):
+            col.markdown(f"<div class='kpi'><div class='v'>{n}</div><div class='l'>{lab}</div></div>", unsafe_allow_html=True)
+        if filtrado:
+            st.caption("Las cifras corresponden a los filtros que elegiste.")
+        st.write("")
+
+
+def lista_de_trabajo(todas, pref, completar=False):
     if not todas:
-        st.success("No hay convocatorias por revisar. 🎉")
-        st.page_link("paginas/mapeo.py", label="Buscar convocatorias nuevas", icon=":material/search:")
+        if completar:
+            st.success("No hay convocatorias por completar.")
+        else:
+            st.success("No hay convocatorias por revisar. 🎉")
+            st.page_link("paginas/mapeo.py", label="Buscar convocatorias nuevas", icon=":material/search:")
     else:
+        if completar:
+            st.info("Estas convocatorias las leyó Gemini, pero a su página le faltaba algún dato obligatorio o parte del texto "
+                    "quedó en otro idioma (la columna **Qué falta** lo dice). Puedes **completarlas aquí a mano**: abre la página "
+                    "oficial, llena lo que falta en el formulario y pulsa **Pasar a Por revisar**, o apruébala directamente. "
+                    "Si no vale la pena, descártala. La búsqueda también vuelve a intentarlas sola con Gemini.")
         with st.expander("Cómo revisar, en 4 pasos", icon=":material/help:"):
             st.markdown("1. **Marca una fila** de la tabla: abajo se abre su ficha.  \n"
                         "2. **Abre la página oficial** y compara nombre, fechas, monto, requisitos y si Colombia puede postularse.  \n"
@@ -105,38 +139,31 @@ with t_rev:
                         "4. **Marca la lista de chequeo y aprueba.** Si falta algo, el sistema te dice qué.  \n\n"
                         "Para descartar varias a la vez (por ejemplo, las que ya cerraron), marca varias filas.")
         hoy = date.today()
-        tabla = pd.DataFrame([_fila_triaje(i, hoy) for i in todas])
+        tabla = pd.DataFrame([_fila_triaje(i, hoy) | ({"Qué falta": "; ".join(i.get("meta", {}).get("faltantes", []))[:160]}
+                                                      if completar else {}) for i in todas])
         tabla["Días"] = pd.to_numeric(tabla["Días"], errors="coerce").astype("Int64")
         dias = lambda df, si_vacio: df["Días"].fillna(si_vacio)  # noqa: E731
-        k = st.columns(5)
-        hace7 = (hoy - pd.Timedelta(days=7)).isoformat()
-        for col, (v, lab) in zip(k, [
-                (len(tabla), "por revisar"),
-                (int(((tabla["Origen"] != "Airtable") & (tabla["Llegó"] >= hace7)).sum()), "llegaron en los últimos 7 días"),
-                (int(((dias(tabla, -1) >= 0) & (dias(tabla, -1) <= 30)).sum()), "cierran en 30 días o menos"),
-                (int((tabla["Errores"] == 0).sum()), "completas, listas para aprobar"),
-                (int((tabla["Edición"] != "").sum()), "nuevas ediciones de años anteriores")]):
-            col.markdown(f"<div class='kpi'><div class='v'>{v}</div><div class='l'>{lab}</div></div>", unsafe_allow_html=True)
-        st.write("")
+        zona_kpi = st.container()  # se llena después de aplicar los filtros: las cifras responden a lo que se filtra
         f1, f2, f3, f4 = st.columns([1.3, 1.3, 1.1, 1.1])
-        origenes = f1.multiselect("Origen", ["Mapeo automático", "Búsqueda con Gemini", "Registro manual", "Airtable"],
-                                  placeholder="Todos")
-        modalidades = f2.multiselect("Modalidad", sorted(tabla["Modalidad"].unique()), placeholder="Todas")
+        origenes = f1.multiselect("Origen", ORIGENES, placeholder="Todos", key=pref + "origen")
+        modalidades = f2.multiselect("Modalidad", sorted(tabla["Modalidad"].unique()), placeholder="Todas", key=pref + "mod")
         OPC_CIERRE = ["Todas", "Abiertas", "Cierra en 30 días o menos", "Con más de un mes y una semana",
                       "Sin fecha o permanente", "Ya cerró"]
         n_cerradas = int((dias(tabla, 0) < 0).sum())
-        if n_cerradas and st.session_state.get("f_cierre", "Todas") == "Todas":
+        if n_cerradas and st.session_state.get(pref + "cierre", "Todas") == "Todas":
             a1, a2 = st.columns([4, 1.2])
             a1.warning(f"**{n_cerradas} convocatorias ya cerraron.** Puedes verlas juntas y descartarlas de una vez.")
-            if a2.button("Mostrar las cerradas", width="stretch"):
-                st.session_state["f_cierre"] = "Ya cerró"
+            if a2.button("Mostrar las cerradas", width="stretch", key=pref + "ver_cerradas"):
+                st.session_state[pref + "cierre"] = "Ya cerró"
                 st.rerun()
-        cierre = f3.selectbox("Cierre", OPC_CIERRE, key="f_cierre")
-        orden = f4.selectbox("Ordenar por", ["Cierre más próximo", "Más recientes", "Menos errores", "Oferente"])
+        cierre = f3.selectbox("Cierre", OPC_CIERRE, key=pref + "cierre")
+        orden = f4.selectbox("Ordenar por", ["Cierre más próximo", "Más recientes", "Menos errores", "Oferente"],
+                             key=pref + "orden")
         g1, g2, g3 = st.columns([2.2, 1.2, 1.1])
-        buscar = g1.text_input("Buscar por nombre u oferente", placeholder="Ej.: DAAD, clima, maestría")
-        elegs = g2.multiselect("Elegibilidad automática", ["Elegible", "Probable", "Revisar"], placeholder="Todas")
-        solo_listas = g3.toggle("Solo las completas", help="Las que no tienen nada en rojo por corregir.")
+        buscar = g1.text_input("Buscar por nombre u oferente", placeholder="Ej.: DAAD, clima, maestría", key=pref + "buscar")
+        elegs = g2.multiselect("Elegibilidad automática", ["Elegible", "Probable", "Revisar"], placeholder="Todas",
+                               key=pref + "eleg")
+        solo_listas = g3.toggle("Solo las completas", help="Las que no tienen nada en rojo por corregir.", key=pref + "listas")
         v = tabla.copy()
         if origenes:
             v = v[v["Origen"].isin(origenes)]
@@ -164,12 +191,13 @@ with t_rev:
         v = {"Cierre más próximo": v.assign(_o=orden_cierre).sort_values(["_o", "Convocatoria"]).drop(columns="_o"),
              "Más recientes": v.sort_values("Llegó", ascending=False), "Menos errores": v.sort_values(["Errores", "Alertas"]),
              "Oferente": v.sort_values("Oferente")}[orden]
+        kpis(zona_kpi, v, tabla, hoy, completar)
         st.caption(f"{len(v)} de {len(tabla)} convocatorias · marca una fila para revisarla; marca varias para descartarlas juntas. "
                    "🔴 cierra en menos de 15 días · 🟠 en un mes y una semana o menos · 🟢 con más plazo.")
         vista = v.drop(columns="id").assign(Días=[str(int(d)) if pd.notna(d) and d >= 0 else "" for d in v["Días"]])  # en las cerradas basta con «🔴 Cerrada»
         evento = st.dataframe(
             vista, hide_index=True, width="stretch", height=min(560, 38 + 35 * max(len(v), 1)),
-            on_select="rerun", selection_mode="multi-row", key="tabla_triaje",
+            on_select="rerun", selection_mode="multi-row", key=pref + "tabla",
             column_config={"Página": st.column_config.LinkColumn("Página", display_text="Abrir ↗"),
                            "Cierre": st.column_config.TextColumn("Cierre", width=110),
                            "Días": st.column_config.TextColumn("Días para cierre", width=110),
@@ -177,6 +205,7 @@ with t_rev:
                            "Listo": st.column_config.TextColumn("Completa", help="✅ = no tiene nada en rojo por corregir"),
                            "Elegibilidad": st.column_config.TextColumn("¿Colombia elegible?",
                                                                      help="Lo que leyó el sistema: Elegible, Probable o Revisar"),
+                           "Qué falta": st.column_config.TextColumn("Qué falta", width="large"),
                            "Errores": st.column_config.NumberColumn("Por corregir", format="%d", help="Datos en rojo: obligatorios"),
                            "Alertas": st.column_config.NumberColumn("Avisos", format="%d", help="Datos en amarillo: conviene mirarlos")})
         filas_sel = evento.selection.rows if evento and evento.selection else []
@@ -185,9 +214,9 @@ with t_rev:
             with st.container(border=True):
                 st.markdown(f"**{len(ids_sel)} convocatorias seleccionadas**")
                 d1, d2, d3 = st.columns([1.6, 1.6, 0.8])
-                motivo = d1.selectbox("Motivo del descarte", F.MOTIVOS_DESCARTE, key="mot_lote")
-                detalle = d2.text_input("Detalle (opcional)", key="det_lote")
-                if d3.button("Descartar seleccionadas", type="primary", width="stretch"):
+                motivo = d1.selectbox("Motivo del descarte", F.MOTIVOS_DESCARTE, key=pref + "mot_lote")
+                detalle = d2.text_input("Detalle (opcional)", key=pref + "det_lote")
+                if d3.button("Descartar seleccionadas", type="primary", width="stretch", key=pref + "desc_lote"):
                     elegidos = [i for i in todas if i["id"] in ids_sel]
                     n = F.descartar_varias(A, elegidos, YO["nombre"], motivo + (f": {detalle}" if detalle else ""))
                     st.session_state["aviso"] = f"{n} convocatorias descartadas."
@@ -233,6 +262,13 @@ with t_rev:
                     F.guardar_cambios(A, item, datos, YO["nombre"])
                     st.toast("Cambios guardados")
                     recargar()
+                if completar:
+                    if st.button("Pasar a Por revisar", type="primary", key="pr_" + item["id"], width="stretch",
+                                 icon=":material/arrow_forward:",
+                                 help="Guarda lo que completaste y la deja en la pestaña Por revisar para aprobarla."):
+                        F.pasar_a_revision(A, item, datos, YO["nombre"])
+                        st.session_state["aviso"] = "Guardada y enviada a Por revisar."
+                        recargar()
                 st.markdown("<div class='paso'>④ Aprobar o descartar</div>", unsafe_allow_html=True)
                 if PUEDE_REVISAR:
                     if st.button("Aprobar y enviar a la base", type="primary", key="a_" + item["id"], width="stretch"):
@@ -253,6 +289,16 @@ with t_rev:
                                 st.error(str(e))
                 else:
                     st.info("Tu rol permite registrar y editar. La aprobación la hace un revisor.")
+
+
+with t_rev:
+    lista_de_trabajo(por_estado["Por revisar"], "rev_")
+    if st.session_state.get("aviso"):
+        st.success(st.session_state.pop("aviso"))
+
+
+with t_comp:
+    lista_de_trabajo(por_estado["Por completar"], "comp_", completar=True)
     if st.session_state.get("aviso"):
         st.success(st.session_state.pop("aviso"))
 

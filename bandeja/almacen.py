@@ -185,7 +185,11 @@ class SincronizadorGitHub:
                   "content": base64.b64encode(Path(origen).read_bytes()).decode()}
         if self.sha:
             cuerpo["sha"] = self.sha
-        r = self.http.put(self._url(), json=cuerpo, timeout=120, headers={"Accept": "application/vnd.github+json"})
+        for intento in range(4):  # GitHub responde a veces 500/502/503 pasajeros: se reintenta con espera creciente
+            r = self.http.put(self._url(), json=cuerpo, timeout=120, headers={"Accept": "application/vnd.github+json"})
+            if r.status_code < 500 or intento == 3:
+                break
+            time.sleep(3 * (intento + 1))
         if r.status_code in (409, 422) and ("sha" in r.text.lower() or r.status_code == 409):
             raise Conflicto(r.text[:300])
         r.raise_for_status()

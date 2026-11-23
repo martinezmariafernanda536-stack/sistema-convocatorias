@@ -191,45 +191,81 @@ def candidato_fechas(datos, hoy):
             "Fecha Límite de Aplicación": f(datos.get("cierre")), "Fecha de Registro": f(hoy)}
 
 
-def ediciones_a_seguir(base, fuentes, historial, hoy, limite=40, cada=30):
-    """Convocatorias de la base (incluidas las que vinieron de Airtable) que ya cerraron y pueden abrir una nueva edición.
+def _aniversario(ref, hoy):
+    """Días que faltan para el aniversario de la fecha `ref` (entre -60 y 305: negativo = pasó hace poco)."""
+    try:
+        aniv = ref.replace(year=hoy.year)
+    except ValueError:  # 29 de febrero
+        aniv = ref.replace(year=hoy.year, day=28)
+    d = (aniv - hoy).days
+    return d + 365 if d < -60 else d - 365 if d > 305 else d
 
-    Se vuelve a abrir su página oficial («Cómo aplicar») aunque las páginas de las fuentes ya no la enlacen. Se rota: cada
-    una se revisa como mucho cada `cada` días y primero las que se acercan al aniversario de su cierre (las convocatorias
-    anuales suelen abrir unos meses antes de esa fecha). Devuelve {id de fuente: [(url, nombre, fila de la base)]}."""
+
+TEMPORADA = (-60, 120)  # desde 2 meses después hasta 4 meses antes del aniversario del cierre anterior
+
+
+def url_de(valor):
+    """La dirección dentro de «Cómo aplicar», aunque venga con texto («Debe ingresar a … en el link https://…»)."""
+    v = str(valor or "").strip()
+    if v.lower().startswith("http") and " " not in v:
+        return v
+    m = re.search(r"https?://[^\s<>\"')\]]+", v)
+    return m.group(0).rstrip(".,;:") if m else ""
+
+
+def url_siguiente_edicion(url, hoy):
+    """Si la dirección trae el año de la edición («becas-2026-2027»), la de la edición siguiente («becas-2027-2028»)."""
+    anos = [int(a) for a in re.findall(r"(?<!\d)(20\d\d)(?!\d)", url)]
+    if not anos or max(anos) > hoy.year + 1:
+        return ""
+    return re.sub(r"(?<!\d)(20\d\d)(?!\d)", lambda m: str(int(m.group(1)) + 1), url)
+
+
+def _seguibles(base, hoy):
+    """Convocatorias de la base que pueden repetirse: no permanentes, ya cerradas y con página oficial.
+
+    Devuelve {url: (días al aniversario, fila)}; si la misma página tiene una edición todavía abierta, no se sigue."""
     from calidad.reglas import fecha as _fecha
-    from motor.config import Fuente
-    por_url = {}
+    abiertas, por_url = set(), {}
     for d in base or []:
-        url = str(d.get("Cómo aplicar") or "").strip()
+        url = url_de(d.get("Cómo aplicar"))
         if not url.lower().startswith("http") or url.lower().endswith(".pdf"):
             continue
         if str(d.get("¿La convocatoria es permanente?") or "").strip().lower().startswith("s"):
             continue
         cierre = _fecha(d.get("Fecha Límite de Aplicación"))
         registro = _fecha(d.get("Fecha de Registro"))
-        if cierre:
-            if cierre >= hoy:
-                continue  # sigue abierta: no hay nueva edición que buscar
-        elif not registro or registro.year >= hoy.year:
+        if cierre and cierre >= hoy:
+            abiertas.add(url)  # sigue abierta: no hay nueva edición que buscar
             continue
-        dias = historial.dias_desde_seguimiento(url, hoy.isoformat())
-        if dias is not None and dias < cada:
+        if not cierre and (not registro or registro.year >= hoy.year):
             continue
-        ref = cierre or registro
-        try:
-            aniversario = ref.replace(year=hoy.year)
-        except ValueError:  # 29 de febrero
-            aniversario = ref.replace(year=hoy.year, day=28)
-        if aniversario < hoy:
-            aniversario = aniversario.replace(year=hoy.year + 1)
-        faltan = (aniversario - hoy).days  # pocos días = la nueva edición debería estar publicada ya o pronto
+        faltan = _aniversario(cierre or registro, hoy)
         previo = por_url.get(url)
-        if previo is None or (ref and previo[0] > faltan):
-            por_url[url] = (faltan, dias is not None, d)
-    elegidas = sorted(por_url.items(), key=lambda kv: (kv[1][1], kv[1][0]))[: max(0, int(limite))]
+        if previo is None or abs(faltan - 30) < abs(previo[0] - 30):
+            por_url[url] = (faltan, d)
+    return {u: v for u, v in por_url.items() if u not in abiertas}
+
+
+def ediciones_a_seguir(base, fuentes, historial, hoy, limite=60, cada=14, fuera_de_temporada=60):
+    """Convocatorias de la base (incluidas las que vinieron de Airtable) que ya cerraron y pueden abrir una nueva edición.
+
+    Se vuelve a abrir su página oficial («Cómo aplicar») aunque las páginas de las fuentes ya no la enlacen.
+    - En temporada (desde 4 meses antes hasta 2 meses después del aniversario de su cierre anterior) se revisa cada
+      `cada` días: es cuando las convocatorias anuales publican la edición nueva.
+    - Fuera de temporada, cada `fuera_de_temporada` días, por si cambió de calendario.
+    Primero las de temporada que nunca se han revisado. Devuelve {id de fuente: (fuente, [(url, nombre)])}."""
+    from motor.config import Fuente
+    por_url = {}
+    for url, (faltan, d) in _seguibles(base, hoy).items():
+        en_temporada = TEMPORADA[0] <= faltan <= TEMPORADA[1]
+        dias = historial.dias_desde_seguimiento(url, hoy.isoformat())
+        if dias is not None and dias < (cada if en_temporada else fuera_de_temporada):
+            continue
+        por_url[url] = ((not en_temporada, dias is not None, abs(faltan - 30)), d)
+    elegidas = sorted(por_url.items(), key=lambda kv: kv[1][0])[: max(0, int(limite))]
     salida = {}
-    for url, (_, _, d) in elegidas:
+    for url, (_, d) in elegidas:
         f = next((f for f in fuentes if extraer.es_del_dominio(url, f.dominio or f.url_becas)), None)
         if f is None:  # el sitio no está entre las fuentes: se usa una fuente provisional con los datos de la base
             host = extraer.dominio_base(url)
@@ -240,7 +276,73 @@ def ediciones_a_seguir(base, fuentes, historial, hoy, limite=40, cada=30):
                        dominio=host, url_becas=url, oficial=str(d.get("Oficial / No Oficial") or "No Oficial"),
                        idioma="", requiere_navegador=False, fila=0,
                        actor=str(d.get("Nombre de actor en CICLOPE") or ""))
-        salida.setdefault(f.id, (f, []))[1].append((url, str(d.get("Nombre de la Convocatoria") or "")))
+        nombre = str(d.get("Nombre de la Convocatoria") or "")
+        salida.setdefault(f.id, (f, []))[1].append((url, nombre))
+        otra = url_siguiente_edicion(url, hoy)
+        if otra:  # la edición siguiente suele publicarse en la misma dirección con el año cambiado
+            salida[f.id][1].append((otra, nombre))
+    return salida
+
+
+def estado_seguimiento(base, items, seguidas, hoy):
+    """Tablero del seguimiento año tras año: qué pasó este ciclo con cada convocatoria de la base que se repite.
+
+    base: filas aprobadas; items: todo lo que hay en el sistema (para ver si ya llegó la edición nueva);
+    seguidas: {url: fecha de la última revisión} del historial. Devuelve una lista de diccionarios."""
+    from rapidfuzz import fuzz, process
+    from calidad.reglas import fecha as _fecha, variantes_nombre
+    import unicodedata
+    meses = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre",
+             "noviembre", "diciembre"]
+    norm = lambda t: " ".join("".join(c for c in unicodedata.normalize("NFD", str(t or "").lower())  # noqa: E731
+                                      if unicodedata.category(c) != "Mn").split())
+    vigentes, urls_vigentes = [], set()  # ediciones de este ciclo: abiertas o llegadas en los últimos 10 meses
+    limite = (hoy - pd.Timedelta(days=300)).isoformat()
+    for i in items:
+        if i.get("estado") == "Descartada":
+            continue
+        d = i["datos"]
+        cierre = _fecha(d.get("Fecha Límite de Aplicación"))
+        if (cierre and cierre >= hoy) or (not cierre and str(i.get("ingreso", ""))[:10] >= limite and
+                                          not str(i.get("origen", "")).startswith("Migración")):
+            vigentes.extend(norm(v) for v in variantes_nombre(d.get("Nombre de la Convocatoria", "")))
+            urls_vigentes.add(url_de(d.get("Cómo aplicar")))
+    vigentes = [v for v in vigentes if v]
+    salida = []
+    seg = _seguibles(base, hoy)
+    for d in base or []:
+        url = url_de(d.get("Cómo aplicar"))
+        if url in seg and seg[url][1] is not d:
+            continue  # misma página en varias filas: se cuenta una vez
+        nombre = d.get("Nombre de la Convocatoria", "")
+        if str(d.get("¿La convocatoria es permanente?") or "").lower().startswith("s"):
+            continue
+        cierre = _fecha(d.get("Fecha Límite de Aplicación"))
+        if cierre and cierre >= hoy:
+            continue  # sigue abierta: es la edición vigente
+        fila = {"Convocatoria": nombre, "Oferente": d.get("Nombre de la Fuente", ""), "Cierre anterior":
+                d.get("Fecha Límite de Aplicación", ""), "Página oficial": url}
+        if url not in seg:
+            fila |= {"Estado": "Sin página oficial para seguirla", "Mes de cierre anterior": "", "Última revisión": ""}
+            salida.append(fila)
+            continue
+        faltan = seg[url][0]
+        ref = cierre or _fecha(d.get("Fecha de Registro"))
+        fila["Mes de cierre anterior"] = meses[ref.month - 1] if ref else ""
+        ya = url in urls_vigentes or any(
+            process.extractOne(norm(v), vigentes, scorer=fuzz.token_set_ratio, score_cutoff=92)
+            for v in variantes_nombre(nombre) if norm(v) and vigentes)
+        cuando = seguidas.get(url, "")
+        fila["Última revisión"] = cuando
+        if ya:
+            fila["Estado"] = "Edición nueva ya en el sistema"
+        elif cuando:
+            fila["Estado"] = "Revisada: aún sin edición nueva"
+        elif TEMPORADA[0] <= faltan <= TEMPORADA[1]:
+            fila["Estado"] = "En temporada: se revisa en la próxima búsqueda"
+        else:
+            fila["Estado"] = "Fuera de temporada: se revisará al acercarse"
+        salida.append(fila)
     return salida
 
 
@@ -360,7 +462,7 @@ def revisar_fuente(fuente, cfg, args, icetex, duplicados, conocidas=frozenset(),
         if fuente.tipo == _radar.TIPO_DESCUBIERTA:
             if _radar.descartable(r.url):  # el enlace terminó en un agregador, una red social o un formulario
                 continue
-            if fuente.nombre == fuente.dominio:
+            if fuente.nombre in (fuente.dominio, fuente.dominio.replace("https://", "")):
                 fuente.nombre = _radar.nombre_del_sitio(r.html) or fuente.nombre
         leida = leida or solo_seguir or fuente.tipo == "Seguimiento de ediciones"
         origen = origen or f"{base_url} (seguimiento de una convocatoria de la base)"
@@ -511,14 +613,14 @@ def mapear(cfg, args):
 
     # 1b. seguimiento de ediciones: convocatorias de la base ya cerradas cuya página se vuelve a abrir (año tras año)
     seguir = {}
-    n_seg = int(cfg.p("Ediciones anteriores a revisar por búsqueda", 40) or 0)
+    n_seg = int(cfg.p("Ediciones anteriores a revisar por búsqueda", 60) or 0)
     registros_base = df_air.fillna("").to_dict("records") if df_air is not None else []
     if not descubrir and registros_base and n_seg > 0 and not getattr(args, "fuente", None) and not getattr(args, "grupo", None):
-        seguir = ediciones_a_seguir(registros_base, fuentes, historial, hoy, n_seg, cada)
+        seguir = ediciones_a_seguir(registros_base, fuentes, historial, hoy, n_seg)
         total = sum(len(v[1]) for v in seguir.values())
         if total:
             log.info("Seguimiento de ediciones: se vuelven a abrir %d convocatorias de la base ya cerradas, para ver si "
-                     "publicaron una nueva edición (las más cercanas al aniversario de su cierre primero).", total)
+                     "publicaron una nueva edición (primero las que están en su temporada de apertura).", total)
     extra = [f for f, _ in seguir.values() if f not in fuentes] + radares
 
     # 1. recorrer las fuentes y reunir candidatas (todavía no se guarda nada en la bandeja)
@@ -580,7 +682,7 @@ def mapear(cfg, args):
         for f in nuevas_ed:
             f["[Sistema] Estado"] = "Nueva edición (seguimiento)"
         log.info("Seguimiento de ediciones: %d revisadas; %d publicaron una edición nueva o cambiaron y pasan a completarse "
-                 "(las demás siguen cerradas y se vuelven a mirar en 30 días).", len(urls_seg), len(nuevas_ed))
+                 "(las demás siguen cerradas: se vuelven a mirar en 14 días si están en temporada, o en 60 si no).", len(urls_seg), len(nuevas_ed))
 
     # 2. elegir las mejores candidatas: no hace falta traer cientos; mejor pocas y completas
     # la misma convocatoria publicada en varios idiomas en el mismo sitio: se deja una (en español si la hay)
@@ -656,7 +758,10 @@ def mapear(cfg, args):
                 continue
         if not getattr(args, "sin_bandeja", False):
             # sin Gemini, lo incompleto no se guarda: se vuelve a considerar cuando Gemini pueda completarlo
-            guardada = enviar_a_bandeja(cfg, [fila], guardar_incompletas=intento_gemini)
+            origen_b = ("Descubrimiento fuera de las fuentes" if descubrir else
+                        "Mapeo automático · nueva edición" if fila.get("[Sistema] Estado") == "Nueva edición (seguimiento)"
+                        else "Mapeo automático")
+            guardada = enviar_a_bandeja(cfg, [fila], origen=origen_b, guardar_incompletas=intento_gemini)
             if not guardada["guardada"]:
                 if guardada["motivo"] == "duplicada":
                     historial.registrar(url, fuente_id, fila, hoy.isoformat())
@@ -757,6 +862,9 @@ def prioridad(fila, hoy):
     p = 0.0
     elig = str(fila.get("[Sistema] Elegibilidad Colombia", ""))
     p += {"Elegible": 3, "Probable": 1.5}.get(elig, 0)
+    if str(fila.get("[Sistema] Duplicado en Airtable", "")).startswith("Nueva edición") or \
+            fila.get("[Sistema] Estado") == "Nueva edición (seguimiento)":
+        p += 8  # edición nueva de una convocatoria que ya está en la base: se completa antes que cualquier otra
     cierre = a_fecha(fila.get("Fecha Límite de Aplicación", ""))
     if cierre and cierre >= hoy:
         dias = (cierre - hoy).days
@@ -1142,7 +1250,7 @@ def externo_reiniciar():
 
 
 # ---------------------------------------------------------------------------
-VERSION = "2026-11-22"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
+VERSION = "2026-11-22d"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
 
 
 class _Argumentos(argparse.ArgumentParser):

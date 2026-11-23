@@ -10,7 +10,7 @@ Este sistema reemplaza a Airtable. Sirve para tres cosas: **encontrar** convocat
 | **Dashboard e informes** | Indicadores, gráficos y el informe automático en Word y PDF |
 | **Revisar convocatorias** (antes «Bandeja de revisión») | Toda convocatoria nueva, mapeada o registrada a mano, se revisa aquí antes de entrar a la base |
 | **Base de convocatorias** (antes «Base de convocatorias») | La base revisada. Muestra «qué falta por corregir» por tipo de pendiente; al marcar uno se filtra la tabla. Tiene filtros por año, modalidad y texto. Al marcar una fila se corrige; varias marcadas se retiran en bloque. También descarga todo en Excel e importa exports de Airtable |
-| **Buscar convocatorias** (antes «Mapeo automático») | Un botón para buscar lo nuevo; opciones avanzadas, búsqueda con Gemini y mantenimiento de fuentes más abajo |
+| **Buscar convocatorias** (antes «Mapeo automático») | Un botón para buscar lo nuevo; opciones avanzadas, «Descubrir convocatorias fuera de las fuentes» y mantenimiento de fuentes más abajo |
 | **Cómo se usa** | Guía para usuarios nuevos: tareas paso a paso, glosario y preguntas frecuentes |
 | **Usuarios** | Crear usuarios y asignar perfiles (solo el administrador) |
 
@@ -93,7 +93,7 @@ No hay que instalar nada ni ejecutar comandos.
 
 1. **GitHub, repositorio del código:** *New repository* → `sistema-convocatorias`, **Public** (puede ser público: no tiene claves; todas van en los Secrets de Streamlit), con README. Luego *Add file → Upload files*: arrastra **todo el contenido** de la carpeta `mapeo_becas` y pulsa *Commit changes*. Incluye `datos/base_inicial.db`, que trae las 176 convocatorias sin usuarios, pero no `datos/convocatorias.db`.
 2. **GitHub, repositorio de los datos:** *New repository* → `convocatorias-datos`, **Public**, con README. Déjalo así: la app lo llena sola.
-3. **Gemini, clave (gratuita):** en aistudio.google.com, entra con una cuenta de Google → *Get API key* → *Create API key*. Copia la clave. Activa la búsqueda con Gemini en sitios oficiales que no están entre las fuentes, y el completado automático de campos. Sin ella, todo lo demás funciona.
+3. **Gemini, clave (gratuita):** en aistudio.google.com, entra con una cuenta de Google → *Get API key* → *Create API key*. Copia la clave. Activa el completado automático de campos (traducción y datos de cada convocatoria). Sin ella, todo lo demás funciona.
 4. **GitHub, token:** *Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token*.
    - Vencimiento de 1 año.
    - *Only select repositories* → `convocatorias-datos`.
@@ -259,7 +259,7 @@ olvida esas convocatorias y las vuelve a encontrar con las reglas nuevas.
 
 ## Control de entrada: lo automático llega en español y completo
 
-Lo que encuentra el sistema solo (mapeo y búsqueda con Gemini) **solo pasa a la bandeja si llega en español y con los campos
+Lo que encuentra el sistema solo (búsqueda y descubrimiento) **solo pasa a la bandeja si llega en español y con los campos
 obligatorios completos**, con las mismas reglas de validación que se aplican al revisar. Si no, queda en el estado
 **Por completar**, que no aparece en la bandeja, con la lista de lo que le falta.
 
@@ -310,7 +310,7 @@ Cómo aplica el sistema cada criterio del procedimiento:
 
 ### Validación y socialización son cosas distintas
 
-- **Validación (numerales 1 a 4):** decide si una convocatoria se registra. El mapeo, la búsqueda con Gemini, las reglas de calidad y la lista de chequeo aplican solo estos criterios. **Toda convocatoria válida entra a la base**, sea de USD 5.000 o de USD 5 millones, cierre en dos semanas o en seis meses.
+- **Validación (numerales 1 a 4):** decide si una convocatoria se registra. El mapeo, el descubrimiento, las reglas de calidad y la lista de chequeo aplican solo estos criterios. **Toda convocatoria válida entra a la base**, sea de USD 5.000 o de USD 5 millones, cierre en dos semanas o en seis meses.
 - **Socialización (numeral 5):** se revisa aparte, sobre las convocatorias ya válidas, para sugerir cuáles difundir además por los canales institucionales. El sistema calcula «Se sugiere para priorización» y su motivo con estos criterios:
   - plazo mayor a un mes y una semana;
   - subvención de más de USD 50.000, o beca;
@@ -355,7 +355,7 @@ Las fuentes con dominio **Por confirmar** o sin dominio quedan inactivas. El pac
 
 ### Uso
 
-Las ejecuciones (validar fuentes, mapeo y búsqueda con Gemini) **corren en segundo plano en el servidor**:
+Las ejecuciones (validar fuentes, búsqueda y descubrimiento) **corren en segundo plano en el servidor**:
 - Siguen aunque se cierre la pestaña, se apague el computador o se cierre la sesión.
 - La página muestra el avance y tiene un botón **Detener**.
 - Hay una sola ejecución a la vez para todo el sistema.
@@ -368,7 +368,7 @@ Desde la página **Buscar convocatorias**:
 2. **Ejecutar mapeo ahora**: se puede elegir qué grupos revisar.
    - **Modo rápido**, el normal: solo abre las convocatorias que no ha visto antes. Las conocidas se marcan como «siguen publicadas» sin volver a abrirlas. Cada fuente tiene además una **revisión completa automática cada 30 días**, para detectar cambios de fecha y nuevas ediciones con el mismo enlace. La primera corrida siempre es completa.
    - **Revisión completa**, con el interruptor de la página: vuelve a abrir todo.
-   - **Seguimiento de ediciones (año tras año):** en cada búsqueda se vuelve a abrir la página oficial («Cómo aplicar») de hasta 40 convocatorias de la base que ya cerraron, incluidas las que vinieron de Airtable, aunque la fuente ya no las enlace o su sitio no esté entre las fuentes. Van primero las que se acercan al aniversario de su cierre, y cada una se revisa como mucho cada 30 días. Si la página publica una fecha nueva, la convocatoria se completa con Gemini y llega a la bandeja como **nueva edición**; si sigue cerrada, se vuelve a mirar al mes siguiente. El número se cambia en el parámetro «Ediciones anteriores a revisar por búsqueda» (0 lo apaga).
+   - **Seguimiento de ediciones (año tras año):** en cada búsqueda se vuelve a abrir la página oficial («Cómo aplicar») de hasta 60 convocatorias de la base que ya cerraron, incluidas las de Airtable, aunque la fuente ya no las enlace. En su **temporada** (desde 4 meses antes hasta 2 meses después de la fecha en que cerró la edición anterior) cada una se revisa cada 14 días; fuera de ella, cada 60. Si el enlace viene dentro de un texto, se toma igual; si la dirección trae el año («becas-2026-2027»), también se prueba la del año siguiente («becas-2027-2028»). Una edición nueva de algo que ya está en la base —la encuentre el seguimiento o la búsqueda normal en las fuentes— se completa **antes que cualquier otra candidata**. El recuadro **«Convocatorias que se repiten cada año»** de la página de búsqueda muestra el estado de cada una (edición nueva ya encontrada, revisada sin novedad, en temporada, sin página oficial) y se puede descargar en Excel.
 
 **Descubrir convocatorias fuera de las fuentes** (botón aparte en *Buscar convocatorias*). No recorre las fuentes: busca oferentes nuevos por tres caminos.
    - **Agregadores como radar.** Por ejemplo Opportunity Desk o Scholars4Dev. El sistema lee sus publicaciones nuevas, sigue el enlace «Apply / Official website» hasta la **página oficial** del oferente y registra solo esa. Ignora redes sociales, otros agregadores, boletines, formularios e ICETEX. Si una publicación no trae enlace oficial, no se usa. Las publicaciones ya vistas no se vuelven a abrir.
@@ -391,38 +391,19 @@ Desde la terminal: `python mapeo.py validar-fuentes`, `python mapeo.py mapear --
 | Bloqueado por robots.txt | El sitio no permite programas automáticos: dejar la fuente inactiva |
 | Falta dominio | Completar **Dominio oficial** y poner **Activa = Sí** |
 
-### Búsqueda externa con Gemini (cuando se requiera)
+### Actualizar desde Airtable (traer lo último sin borrar nada)
 
-El mapeo solo revisa las fuentes configuradas. Para encontrar convocatorias en **otros sitios oficiales**, la página **Buscar convocatorias → Buscar en otros sitios oficiales (con Gemini)** le pide a Gemini (con búsqueda de Google) convocatorias abiertas a Colombia, con estas condiciones en la instrucción:
-- solo sitios oficiales del oferente: nada de agregadores, acortadores, redes sociales ni noticias;
-- Colombia elegible, con la frase de la página que lo prueba;
-- convocatoria abierta o permanente;
-- si es beca, que no esté en ICETEX;
-- que no invente enlaces;
-- que use los valores de las listas del formulario (público, temáticas, modalidad, tipo de actor).
+En **Base de convocatorias → Actualizar desde Airtable** (solo administrador) se carga un export nuevo de Airtable (CSV o Excel). Antes de aplicar se ve cuántas filas son nuevas, cuántas ya están y cuántas no se tocarán. Al aplicar:
+- lo que no está se agrega, con las correcciones de la migración (a *Revisar convocatorias*, o a la base si se desmarca la casilla y tenía las tres verificaciones);
+- lo que ya está y nadie ha tocado en el sistema se actualiza con lo que cambió en Airtable;
+- lo que ya se editó, revisó, aprobó o descartó en el sistema no se toca;
+- una fila que es la misma convocatoria del mismo año que otra ya registrada no se duplica;
+- los actores nuevos se agregan al catálogo.
+Se puede cargar el mismo archivo varias veces: la segunda vez no cambia nada. No hay que volver a migrar (la migración desde cero borra todo lo del sistema).
 
-**Gemini solo propone.** El sistema abre cada página y le aplica las mismas reglas del mapeo:
-1. Descarta agregadores, formularios e ICETEX.
-2. Descarta las páginas que no existen, así se eliminan los enlaces inventados.
-3. Revisa elegibilidad, fecha y duplicados.
+### Búsqueda en Google con Gemini (retirada)
 
-Lo que pasa llega a la **bandeja** con los campos de la base llenos:
-- **Lo que se lee en la página manda:** fecha límite, monto, correo, público, temáticas e idioma.
-- **Gemini completa los vacíos:** objetivos, poblaciones priorizadas, ámbito geográfico, Plan Marco, tipo de monto y observaciones. También pone en español el nombre (con el original entre paréntesis) y la descripción.
-- **Solo se aceptan valores de las listas del formulario**, y las temáticas son máximo 3. Al completar las temáticas se calculan también ENCI, ODS, CAD, sector y PND.
-- **Revisión de la propuesta:** en la bandeja se ven los campos que completó Gemini y si la frase con la que prueba que Colombia es elegible aparece de verdad en la página.
-
-Quedan para quien revisa las verificaciones, la priorización, el acompañamiento y los campos de publicación, que se hacen por fuera. Los sitios nuevos aparecen como **fuentes sugeridas** y el administrador decide si se agregan al mapeo.
-
-Para activarla:
-1. Crear una clave en Google AI Studio y agregarla como secreto `GEMINI_API_KEY`.
-2. El modelo se elige en la hoja **Parametros → Modelo de Gemini**, o con el secreto `GEMINI_MODEL`. Por defecto es `gemini-3.5-flash-lite`: en el plan gratuito permite unas **500 consultas al día** (Gemini 3.8 Flash solo
-20). El sistema prueba los modelos en cadena (`gemini-3.5-flash-lite` → `gemini-3.1-flash-lite` → `gemini-3.8-flash`): si
-uno está saturado (503) reintenta y pasa al siguiente; si uno agota su cupo del día (429) sigue con el siguiente; si todos lo
-agotan, lo que falta queda para la próxima búsqueda (el cupo se reinicia a medianoche, hora del Pacífico). Entre consultas
-espera 6,5 segundos para no pasar el límite por minuto. Si Google retira el modelo configurado, el sistema usa automáticamente el que Google sugiere en su respuesta y lo avisa en el registro. Ojo: en algunos modelos la búsqueda en Google de Gemini (paso 3, búsqueda externa) puede exigir facturación activa; el completado de campos del mapeo no busca en Google y no la necesita. En la página de Mapeo, el interruptor **Completar campos con Gemini** permite apagarlo en una corrida.
-
-Desde la terminal: `python mapeo.py buscar-externo --modalidad Subvención --tema "cambio climático"`.
+Se quitó de la app: la búsqueda en Google de Gemini solo funciona con facturación activa en Google AI Studio, y con la clave gratuita siempre fallaba. Para encontrar oferentes que no están en la lista de fuentes se usa **Descubrir convocatorias fuera de las fuentes**, que es gratuita.
 
 ### ICETEX
 
@@ -445,7 +426,7 @@ Con 2 puntos o más es *Elegible*; con 1, *Probable*; si la página no dice qui�
 
 ### Completar los campos con Gemini (mapeo normal)
 
-Si existe el secreto `GEMINI_API_KEY`, cada convocatoria nueva que encuentra el mapeo se completa leyendo su página oficial. En este caso Gemini no busca en Google; solo lee el texto que el sistema ya descargó. Se aplican las mismas reglas de la búsqueda externa:
+Si existe el secreto `GEMINI_API_KEY`, cada convocatoria nueva que encuentra el mapeo se completa leyendo su página oficial. En este caso Gemini no busca en Google; solo lee el texto que el sistema ya descargó. Se aplican estas reglas:
 - lo que se leyó en la página manda;
 - Gemini completa los vacíos y pone en español el nombre y la descripción;
 - solo se aceptan valores de las listas del formulario;

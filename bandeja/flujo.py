@@ -92,6 +92,21 @@ def guardar_cambios(almacen, item, datos, usuario, hoy=None):
     return item
 
 
+def pasar_a_revision(almacen, item, datos, usuario, hoy=None):
+    """Una «Por completar» que una persona completó a mano: se guarda y pasa a «Por revisar».
+
+    Queda marcada como tocada por una persona, así que la limpieza automática ya no la devuelve."""
+    item["datos"] = dict(datos)
+    _, hallazgos = evaluar(almacen, datos, hoy)
+    item["meta"]["pendientes"] = [h.__dict__ for h in hallazgos if h.nivel in ("Error", "Alerta") and h.regla != "R07"]
+    item["meta"].pop("hallazgos_ingreso", None)
+    item["meta"].pop("faltantes", None)
+    item["estado"] = "Por revisar"
+    _evento(item, usuario, "Completada a mano", "Pasó de «Por completar» a «Por revisar»")
+    almacen.guardar_item(item)
+    return item
+
+
 def aprobar(almacen, item, datos, usuario, chequeo, hoy=None):
     """Aprueba la revisión. Devuelve (estado_nuevo, hallazgos)."""
     faltan = [c for c in LISTA_CHEQUEO if not chequeo.get(c)]
@@ -128,7 +143,7 @@ def tocada_por_persona(item):
 
 def es_automatica(item):
     o = str(item.get("origen", ""))
-    return o.startswith("Mapeo automático") or o.startswith("Búsqueda externa")
+    return o.startswith("Mapeo automático") or o.startswith("Búsqueda externa") or o.startswith("Descubrimiento")
 
 
 def pendientes(item):

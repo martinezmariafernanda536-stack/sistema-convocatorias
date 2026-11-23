@@ -47,7 +47,7 @@ def pantalla_configuracion(error=None):
         st.markdown("- **GITHUB_DATA_REPO:** tu usuario de GitHub / el repositorio de datos.\n"
                     "- **GITHUB_TOKEN:** token de GitHub con permiso *Contents: Read and write* solo sobre ese repositorio.\n"
                     "- **GEMINI_API_KEY:** clave gratuita de aistudio.google.com (*Get API key → Create API key*). Activa la "
-                    "búsqueda con Gemini y el completado automático de campos. Si aún no la tienes, borra esa línea.\n"
+                    "el completado automático de campos con Gemini. Si aún no la tienes, borra esa línea.\n"
                     "- **USUARIOS_CLAVE** y **CLAVE_INSTALACION:** ya vienen generadas. **Guárdalas también en un lugar seguro**: "
                     "la clave de instalación sirve para crear el primer administrador y para recuperar el acceso de un administrador.")
 

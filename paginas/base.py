@@ -172,17 +172,43 @@ if YO["rol"] == "admin":
 
 if YO["rol"] == "admin":
     st.divider()
-    st.markdown("#### Importación masiva desde Airtable")
-    st.write("Carga un export CSV de Airtable. Solo se agregan las convocatorias que aún no están en el sistema "
-             "(se comparan por enlace y por nombre); se corrigen igual que en la migración.")
-    archivo = st.file_uploader("Export CSV de Airtable", type="csv")
-    todo_rev = st.checkbox("Enviar todas a la bandeja de revisión", value=True,
-                           help="Si se desmarca, las que tenían las tres verificaciones en Airtable entran directo a la base.")
-    if archivo and st.button("Importar", type="primary"):
-        from calidad.migracion import importar
-        with st.spinner("Importando…"):
-            tabla, nuevos = importar(pd.read_csv(archivo), A, todo_a_revision=todo_rev)
-        st.success(f"{(tabla['Resultado'] != 'Ya estaba en el sistema').sum()} convocatorias nuevas · "
-                   f"{(tabla['Resultado'] == 'Ya estaba en el sistema').sum()} ya estaban · {len(nuevos)} actores nuevos en el catálogo.")
-        st.dataframe(tabla, hide_index=True, width="stretch")
-        st.cache_data.clear()
+    st.markdown("#### Actualizar desde Airtable")
+    st.write("Para traer lo último que se registró en Airtable: descarga de nuevo el export (CSV) y cárgalo aquí. "
+             "**No se borra nada del sistema.**")
+    st.markdown("- Las convocatorias que **no están** se agregan, con las mismas correcciones de la migración.\n"
+                "- Las que **ya están y nadie ha tocado aquí** se actualizan con lo que cambió en Airtable.\n"
+                "- Las que **ya se editaron, revisaron, aprobaron o descartaron aquí** no se tocan: manda lo del sistema.\n"
+                "- Si una fila es la misma convocatoria del mismo año que otra ya registrada, no se duplica.\n"
+                "- Los actores nuevos se agregan al catálogo.")
+    archivo = st.file_uploader("Export de Airtable (CSV o Excel)", type=["csv", "xlsx"], key="air_csv")
+    todo_rev = st.checkbox("Enviar las nuevas a Revisar convocatorias", value=True,
+                           help="Si se desmarca, las nuevas que tenían las tres verificaciones en Airtable entran directo a la base.")
+    if archivo:
+        from calidad import migracion as MG
+        try:
+            df_air = (pd.read_excel(archivo, dtype=str) if archivo.name.lower().endswith(".xlsx")
+                      else pd.read_csv(archivo, dtype=str, encoding="utf-8-sig"))
+            if "Nombre de la Convocatoria" not in df_air.columns:
+                raise ValueError("no tiene la columna «Nombre de la Convocatoria»; ¿es el export de la tabla de convocatorias?")
+            prev = MG.revisar_actualizacion(df_air, A)
+        except Exception as e:  # noqa: BLE001
+            st.error(f"No se pudo leer el archivo: {e}")
+            prev = None
+        if prev:
+            p1, p2, p3, p4 = st.columns(4)
+            p1.metric("Filas en el export", prev["filas"])
+            p2.metric("Nuevas (se agregan)", prev["nuevas"])
+            p3.metric("Ya están (se actualizan si cambiaron)", prev["se_pueden_actualizar"])
+            p4.metric("Editadas aquí (no se tocan)", prev["editadas_aqui"] + prev["iguales_a_otra"])
+            if st.button("Aplicar la actualización", type="primary", icon=":material/sync:"):
+                from analitica.datos import cargar_tabla_tipos
+                tipos = {k: v[0] for k, v in cargar_tabla_tipos().items() if v[1] == "Tabla"}
+                with st.spinner("Actualizando…"):
+                    res, det = MG.actualizar(df_air, A, tipos_corregidos=tipos, todo_a_revision=todo_rev)
+                st.success(f"Listo: {res['nuevas']} nuevas ({res['a_la_base']} a la base, {res['a_revisar']} a Revisar "
+                           f"convocatorias) · {res['actualizadas']} actualizadas · {res['sin_cambios']} sin cambios · "
+                           f"{res['editadas_aqui'] + res['iguales_a_otra']} no se tocaron · "
+                           f"{res['actores_nuevos']} actores nuevos.")
+                if len(det):
+                    st.dataframe(det, hide_index=True, width="stretch")
+                st.cache_data.clear()

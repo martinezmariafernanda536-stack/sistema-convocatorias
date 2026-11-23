@@ -207,3 +207,146 @@ def importar(df_crudo, almacen, hoy=None, todo_a_revision=False):
         almacen.guardar_items(items, f"Importación masiva: {len(items)} convocatorias")
     tabla = pd.DataFrame(resultado, columns=["Convocatoria", "Resultado", "Detalle"])
     return tabla, nuevos_actores
+
+
+# --- actualizar desde un export nuevo de Airtable (sin borrar nada) ------------------------
+_ACCIONES_DEL_SISTEMA = {"Ingreso", "Migrada desde Airtable", "Actualizada desde Airtable", "Importada desde Airtable"}
+
+
+def editada_en_el_sistema(item):
+    """True si alguien la editó, revisó, aprobó o descartó en este sistema (entonces Airtable no la pisa)."""
+    return any(e.get("accion") not in _ACCIONES_DEL_SISTEMA for e in item.get("historial", []))
+
+
+def _clave(nombre, registro):
+    import unicodedata
+    n = "".join(c for c in unicodedata.normalize("NFD", str(nombre or "").lower()) if unicodedata.category(c) != "Mn")
+    n = " ".join("".join(ch if ch.isalnum() else " " for ch in n).split())
+    f = R.fecha(registro)
+    return f"{n}|{f.isoformat() if f else ''}"
+
+
+def _filas_export(df_crudo):
+    df = df_crudo[df_crudo["Nombre de la Convocatoria"].notna()].reset_index(drop=True)
+    df = df[df["Nombre de la Convocatoria"].astype(str).str.strip() != ""].reset_index(drop=True)
+    return df, df.to_dict("records")
+
+
+def _emparejar(registros, items):
+    """Para cada fila del export, la convocatoria del sistema que le corresponde (o None)."""
+    from calidad.reglas import IndiceDuplicados
+    por_clave = {}
+    for i in items:
+        d = i["datos"]
+        por_clave.setdefault(_clave(d.get("Nombre de la Convocatoria"), d.get("Fecha de Registro")), i)
+    indice, por_id = IndiceDuplicados(), {}
+    for i in items:
+        if i.get("estado") != "Descartada" or str(i.get("origen", "")).startswith(ORIGEN):
+            indice.agregar(i["datos"])
+            por_id[id(i["datos"])] = i
+    pares = []  # (item, exacta): exacta = mismo nombre y misma fecha de registro (la misma fila de Airtable)
+    for reg in registros:
+        item = por_clave.get(_clave(reg.get("Nombre de la Convocatoria"), reg.get("Fecha de Registro")))
+        exacta = item is not None
+        if item is None:
+            limpio = {k: ("" if (isinstance(v, float) and v != v) else v) for k, v in reg.items()}
+            tipo, otro = indice.buscar(limpio)
+            if tipo in ("mismo_año", "nombre_mismo_año") and otro is not None:
+                item = por_id.get(id(otro))
+        pares.append((item, exacta))
+    return pares
+
+
+def revisar_actualizacion(df_crudo, almacen):
+    """Vista previa, sin cambiar nada: cuántas filas del export son nuevas y cuántas ya están."""
+    _, registros = _filas_export(df_crudo)
+    pares = _emparejar(registros, almacen.items())
+    nuevas = sum(1 for p, _ in pares if p is None)
+    editadas = sum(1 for p, _ in pares if p is not None and editada_en_el_sistema(p))
+    parecidas = sum(1 for p, e in pares if p is not None and not e and not editada_en_el_sistema(p))
+    return {"filas": len(registros), "nuevas": nuevas, "ya_estan": len(registros) - nuevas,
+            "se_pueden_actualizar": len(registros) - nuevas - editadas - parecidas, "editadas_aqui": editadas,
+            "iguales_a_otra": parecidas}
+
+
+def actualizar(df_crudo, almacen, hoy=None, tipos_corregidos=None, todo_a_revision=False):
+    """Trae lo último de un export de Airtable SIN borrar nada del sistema.
+
+    - Convocatoria que no está: se agrega como en la migración (a la base si tenía las tres verificaciones; si no, a
+      Revisar convocatorias), con las mismas correcciones automáticas.
+    - Convocatoria que ya está y nadie ha tocado en este sistema: se actualiza con lo que cambió en Airtable.
+    - Convocatoria que ya se editó, revisó, aprobó o descartó aquí: no se toca (manda lo del sistema).
+    - Actores nuevos del export: se agregan al catálogo; los que ya existen no se modifican.
+    Devuelve (resumen, tabla de detalle)."""
+    from bandeja.almacen import ahora
+    hoy = hoy or date.today()
+    df, registros = _filas_export(df_crudo)
+    items = almacen.items()
+    pares = _emparejar(registros, items)
+    catalogo = almacen.catalogo()
+    del_export = construir_desde_base(df, tipos_corregidos)
+    actores_nuevos = [a for a in del_export.actores.values()
+                      if not any(catalogo.buscar(n) for n in [a.nombre] + list(a.alias))]
+    for a in actores_nuevos:
+        catalogo.agregar(a)
+    cambiar, detalle = [], []
+    res = {"filas": len(registros), "nuevas": 0, "a_la_base": 0, "a_revisar": 0, "actualizadas": 0,
+           "sin_cambios": 0, "editadas_aqui": 0, "iguales_a_otra": 0, "actores_nuevos": len(actores_nuevos)}
+    tocados = set()
+    for n, (reg, (item, exacta)) in enumerate(zip(registros, pares)):
+        datos, cambios, pendientes = corregir(reg, catalogo, [], hoy)
+        datos = {k: ("" if (isinstance(v, float) and v != v) else v) for k, v in datos.items()}
+        nombre = datos.get("Nombre de la Convocatoria", "")
+        revisada = revisada_en_airtable(reg)
+        if item is None:
+            revisada = revisada and not todo_a_revision
+            estado = "Aprobada" if revisada else "Por revisar"
+            nuevo = nuevo_item(datos, ORIGEN if revisada else ORIGEN + " · revisión incompleta",
+                               {"migracion": True, "cambios": cambios, "pendientes": pendientes}, estado=estado)
+            f_reg = R.fecha(datos.get("Fecha de Registro"))
+            nuevo["ingreso"] = f"{f_reg.isoformat()} 00:00" if f_reg else nuevo["ingreso"]
+            nuevo["revisado_por"] = str(reg.get("Reportado por") or "")
+            nuevo["historial"] = [{"fecha": ahora(), "usuario": "Migración", "accion": "Migrada desde Airtable",
+                                   "detalle": "Agregada al actualizar desde un export nuevo de Airtable"}]
+            cambiar.append(nuevo)
+            res["nuevas"] += 1
+            res["a_la_base" if revisada else "a_revisar"] += 1
+            detalle.append({"Fila": n + 2, "Convocatoria": nombre, "Resultado": "Nueva: " + (
+                "entra a la base" if revisada else "va a Revisar convocatorias (no tenía las tres verificaciones)")})
+            continue
+        if not exacta or item["id"] in tocados:
+            # otra fila con la misma convocatoria del mismo año (por ejemplo, el mismo enlace): no se duplica ni se
+            # mezcla con la que ya está
+            res["iguales_a_otra"] += 1
+            detalle.append({"Fila": n + 2, "Convocatoria": nombre, "Resultado": "Ya está en el sistema como «"
+                            + str(item["datos"].get("Nombre de la Convocatoria", ""))[:80] + "» (mismo año): no se agrega"})
+            continue
+        tocados.add(item["id"])
+        if editada_en_el_sistema(item):
+            res["editadas_aqui"] += 1
+            detalle.append({"Fila": n + 2, "Convocatoria": nombre,
+                            "Resultado": "Ya estaba y se editó en este sistema: no se toca"})
+            continue
+        distintos = [k for k, v in datos.items() if str(item["datos"].get(k, "") or "") != str(v or "")]
+        pasa_a_base = revisada and item["estado"] == "Por revisar"
+        if not distintos and not pasa_a_base:
+            res["sin_cambios"] += 1
+            continue
+        item["datos"] = {**item["datos"], **{k: datos[k] for k in distintos}}
+        item["meta"]["pendientes"] = pendientes
+        if pasa_a_base:
+            item["estado"] = "Aprobada"
+            item["origen"] = ORIGEN
+        item.setdefault("historial", []).append({"fecha": ahora(), "usuario": "Migración",
+                                                 "accion": "Actualizada desde Airtable",
+                                                 "detalle": "Campos: " + ", ".join(distintos)[:300]})
+        cambiar.append(item)
+        res["actualizadas"] += 1
+        detalle.append({"Fila": n + 2, "Convocatoria": nombre, "Resultado": "Actualizada: " + ", ".join(distintos)[:200]
+                        + ("; pasó a la base (ya tenía las tres verificaciones)" if pasa_a_base else "")})
+    if actores_nuevos:
+        almacen.reemplazar_catalogo(catalogo)
+    if cambiar:
+        almacen.guardar_items(cambiar, f"Actualización desde Airtable: {res['nuevas']} nuevas, "
+                                       f"{res['actualizadas']} actualizadas")
+    return res, pd.DataFrame(detalle, columns=["Fila", "Convocatoria", "Resultado"])

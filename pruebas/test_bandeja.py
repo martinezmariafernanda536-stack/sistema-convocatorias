@@ -570,7 +570,8 @@ def test_sesion_sobrevive_reconexion_y_se_anula(almacen):
     U.crear(almacen, "ana", "Ana Pérez", "revisor", clave="Cafetal#Verde58", temporal=False)
     ficha = U.emitir_sesion(almacen, "ana")
     assert U.leer_sesion(almacen, ficha)["usuario"] == "ana"          # reconexión: entra sin contraseña
-    assert U.leer_sesion(almacen, ficha[:-1] + "0") is None           # ficha alterada
+    alterada = ficha[:-1] + ("1" if ficha[-1] == "0" else "0")        # (cambia siempre el último carácter)
+    assert U.leer_sesion(almacen, alterada) is None                    # ficha alterada
     assert U.leer_sesion(almacen, U.emitir_sesion(almacen, "ana", horas=-1)) is None  # vencida
     U.cambiar_clave(almacen, "ana", "Cafetal#Verde58", "Montaña#Azul73", "Montaña#Azul73")
     assert U.leer_sesion(almacen, ficha) is None                       # cambiar la contraseña la anula
@@ -710,3 +711,37 @@ def test_crea_la_rama_de_datos_si_no_existe():
             return R(201)
     SincronizadorGitHub("u/sistema-convocatorias", "t", rama="datos", sesion=Sesion())
     assert Sesion.creada == {"ref": "refs/heads/datos", "sha": "abc123"}
+
+
+def test_actualizar_desde_airtable_sin_borrar_nada(almacen):
+    """Export nuevo de Airtable: agrega lo nuevo, actualiza lo que nadie tocó, respeta lo editado aquí y no duplica."""
+    from calidad import migracion as MG
+    from bandeja import flujo
+    df = pd.read_csv(Path(__file__).resolve().parents[1] / "datos" / "airtable_actual.csv", dtype=str)
+    MG.migrar(df, almacen)
+    total = len(almacen.items())
+    editada = almacen.items()[0]
+    flujo.guardar_cambios(almacen, editada, editada["datos"] | {"Descripción": "Corregida en el sistema"}, "Natalia")
+    nombre_editada = editada["datos"]["Nombre de la Convocatoria"]
+    df2 = df.copy()
+    fila_ed = df2.index[df2["Nombre de la Convocatoria"].str.strip() == nombre_editada.strip()]
+    if len(fila_ed):
+        df2.loc[fila_ed[0], "Descripción"] = "Airtable dice otra cosa"
+    otra = 1 if not len(fila_ed) or fila_ed[0] != 1 else 2
+    df2.loc[otra, "Observaciones sobre el financiamiento"] = "Monto actualizado en Airtable"
+    nueva = df.iloc[3].copy()
+    nueva["Nombre de la Convocatoria"] = "Convocatoria registrada después en Airtable 2027"
+    nueva["Fecha de Registro"] = "2026-11-20"
+    nueva["Cómo aplicar"] = "https://ejemplo-nuevo.org/convocatoria-2027"
+    df2 = pd.concat([df2, pd.DataFrame([nueva])], ignore_index=True)
+    prev = MG.revisar_actualizacion(df2, almacen)
+    assert prev["nuevas"] == 1 and prev["editadas_aqui"] == 1
+    res, det = MG.actualizar(df2, almacen)
+    assert res["nuevas"] == 1 and res["actualizadas"] >= 1 and res["editadas_aqui"] == 1
+    assert len(almacen.items()) == total + 1                                      # nada se borró ni se duplicó
+    por_nombre = {i["datos"]["Nombre de la Convocatoria"]: i for i in almacen.items()}
+    assert por_nombre[nombre_editada]["datos"]["Descripción"] == "Corregida en el sistema"   # manda lo del sistema
+    cambiada = por_nombre[str(df.loc[otra, "Nombre de la Convocatoria"]).strip()]
+    assert "Monto actualizado en Airtable" in cambiada["datos"]["Observaciones sobre el financiamiento"]
+    res2, _ = MG.actualizar(df2, almacen)                                           # cargarlo otra vez no cambia nada
+    assert res2["nuevas"] == 0 and res2["actualizadas"] == 0 and len(almacen.items()) == total + 1

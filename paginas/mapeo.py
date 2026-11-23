@@ -95,8 +95,9 @@ def panel_ejecucion():
                                                   f"{k} de {n} convocatorias completas en la bandeja")
             elif total:
                 st.progress(hechas / total, text=f"Paso 1 de 2 · {hechas} de {total} fuentes revisadas")
-            else:
-                st.progress(0.0, text="Preparando…")
+            else:  # sin avance medible: se muestra lo último que está haciendo, para que no parezca detenida
+                ultima = next((l for l in reversed(t.lineas) if l.strip()), "")
+                st.progress(0.0, text=(ultima[:140] if ultima else "Preparando…"))
             st.caption("Puedes cerrar esta pestaña o seguir trabajando: la búsqueda sigue en el servidor y lo encontrado "
                        "va llegando a Revisar convocatorias.")
             with st.expander("Ver detalle técnico"):
@@ -123,7 +124,7 @@ def panel_ejecucion():
                 st.caption("Alguien pulsó «Detener». Lo encontrado hasta ese momento ya está guardado.")
             with st.expander("Ver detalle técnico"):
                 st.code("\n".join(t.lineas[-40:]) or "(sin mensajes)", language=None)
-            if t.comando in ("mapear", "descubrir", "buscar-externo", "completar-pendientes"):
+            if t.comando in ("mapear", "descubrir", "completar-pendientes"):
                 st.page_link("paginas/bandeja.py", label="Revisar lo que encontró", icon=":material/fact_check:")
 
 
@@ -154,7 +155,7 @@ def revisar_version():
     faltan = []
     try:
         import mapeo as programa
-        if getattr(programa, "VERSION", "") < "2026-11-22":
+        if getattr(programa, "VERSION", "") < "2026-11-22d":
             faltan.append("mapeo.py")
         if importlib.util.find_spec("motor.radar") is None:
             faltan.append("motor/radar.py")
@@ -277,7 +278,9 @@ if por_completar:
     with st.container(border=True):
         st.markdown(f"#### {len(por_completar)} convocatorias por completar")
         st.caption("Gemini ya leyó su página, pero les faltan datos obligatorios, así que **no pasan a la bandeja**. El "
-                   f"sistema reintenta unas pocas en cada búsqueda (hasta {E.INTENTOS_MAXIMOS} veces cada una).")
+                   f"sistema reintenta unas pocas en cada búsqueda (hasta {E.INTENTOS_MAXIMOS} veces cada una). También "
+                   "puedes **completarlas a mano** en Revisar convocatorias → pestaña **Por completar**.")
+        st.page_link("paginas/bandeja.py", label="Completarlas a mano", icon=":material/edit_note:")
         if len(por_completar) > 100 and YO["rol"] == "admin":
             st.warning(f"Hay **{len(por_completar)}** acumuladas de búsquedas anteriores, cuando todo lo encontrado se guardaba "
                        "aunque no se pudiera completar. Conviene **vaciar la lista**: el sistema las olvida y las vuelve a "
@@ -338,6 +341,7 @@ if ult and not OCUPADO:
             st.code("\n".join(r["log"]) or "(sin mensajes)")
 
 # --- descubrir convocatorias fuera de las fuentes ----------------------------------------
+from calidad import entrada as E  # noqa: E402
 try:
     radar = pd.read_excel(tmp_cfg, sheet_name="Radar", dtype=str).fillna("")
 except Exception:  # noqa: BLE001 - configuración anterior, sin la hoja Radar
@@ -367,8 +371,28 @@ with st.container(border=True):
         import io
         hojas_d = pd.read_excel(io.BytesIO(rep_d), sheet_name=None, dtype=str)
         listo = [l for l in reg_d.get("log", []) if "Listo:" in l]
-        st.markdown(f"**Último descubrimiento:** {reg_d.get('fecha', '')} · {reg_d.get('usuario', '')}"
-                    + (f"  \n{listo[-1].split('Listo:', 1)[1].strip()}" if listo else ""))
+        st.markdown(f"**Último descubrimiento:** {reg_d.get('fecha', '')} · {reg_d.get('usuario', '')}")
+        es_desc = lambda i: i["origen"].startswith("Descubrimiento") or "· RAD-" in i["origen"]  # noqa: E731
+        en_rev = [i for i in A.items("Por revisar") if es_desc(i)]
+        en_comp = [i for i in A.items(E.ESTADO) if es_desc(i)]
+        with st.container(border=True):
+            st.markdown("**¿Dónde quedan las que encuentra?** En **Revisar convocatorias**, con el origen "
+                        "«Descubierta fuera de las fuentes»:")
+            k1, k2 = st.columns(2)
+            k1.metric("En la pestaña Por revisar", len(en_rev), help="Llegaron completas y en español: listas para revisar.")
+            k2.metric("En la pestaña Por completar", len(en_comp),
+                      help="Les falta algún dato obligatorio: se completan a mano o se reintentan con Gemini.")
+            b1, b2 = st.columns(2)
+            if b1.button("Ver las que llegaron", icon=":material/inbox:", disabled=not en_rev, width="stretch"):
+                st.session_state["rev_origen"] = ["Descubierta fuera de las fuentes"]
+                st.switch_page("paginas/bandeja.py")
+            if b2.button("Ver las por completar", icon=":material/edit_note:", disabled=not en_comp, width="stretch",
+                         help="Se abre Revisar convocatorias: elige la pestaña «Por completar»."):
+                st.session_state["comp_origen"] = ["Descubierta fuera de las fuentes"]
+                st.switch_page("paginas/bandeja.py")
+            if listo:
+                st.caption("Detalle de la última corrida: " + listo[-1].split("Listo:", 1)[1].strip()
+                           + " Las descartadas (páginas de inicio de sesión, noticias, no elegibles) están en el reporte.")
         d1, d2 = st.columns([1, 2])
         d1.download_button("Descargar reporte (Excel)", rep_d, f"descubrimiento_{reg_d.get('fecha', '')[:10]}.xlsx",
                            icon=":material/download:", key="desc_rep")
@@ -380,45 +404,59 @@ with st.container(border=True):
                         "convocatorias. Al agregarlos, la búsqueda normal los revisa siempre.")
             tabla_sugeridas(sug_d, "sug_radar", "Descubrimiento (radar)")
 
-# --- búsqueda fuera de las fuentes, con Gemini ---------------------------------------
-st.markdown("#### Buscar en otros sitios oficiales (con Gemini)")
-st.write("Úsala cuando necesites algo puntual, por ejemplo un tema o un país. Gemini busca en Google convocatorias en **sitios "
-         "oficiales que no están en la lista de fuentes**; el sistema abre cada página y le aplica las mismas reglas "
-         "(sitio oficial, Colombia elegible, convocatoria abierta, sin agregadores ni ICETEX). Lo que pasa llega a la revisión.")
-if clave:
-    g1, g2, g3 = st.columns([1.3, 1.3, 0.8])
-    mods = g1.multiselect("Modalidades", ["Beca", "Subvención", "Cooperación técnica", "Premio"],
-                          default=["Beca", "Subvención", "Cooperación técnica", "Premio"])
-    tema = g2.text_input("Tema (opcional)", placeholder="Ej.: cambio climático, paz, salud")
-    region = g2.text_input("País o región del oferente (opcional)", placeholder="Ej.: Unión Europea, Japón")
-    maximo = g3.number_input("Cuántas pedir", 3, 20, 10)
-    if st.button("Buscar con Gemini", disabled=not mods or OCUPADO, icon=":material/travel_explore:"):
-        extra_g = [x for m in mods for x in ("--modalidad", m)] + ["--maximo", str(maximo)]
-        if tema:
-            extra_g += ["--tema", tema]
-        if region:
-            extra_g += ["--region", region]
-        ejecutar("buscar-externo", "Búsqueda con Gemini", extra_g)
-    st.caption("Si aparece un error de facturación: en algunos modelos, la búsqueda en Google de Gemini exige tener la facturación "
-               "activa. La búsqueda normal de arriba no lo necesita.")
-else:
-    st.info("No está disponible todavía: el administrador debe agregar la clave **GEMINI_API_KEY** en los secretos de Streamlit.")
+# --- seguimiento año tras año ---------------------------------------------------------
+@st.cache_data(ttl=600, show_spinner=False)
+def _tablero_seguimiento(_almacen, n_items, dia):
+    import mapeo as programa
+    hist = json.loads(_almacen.leer_archivo("historial_mapeo.json") or b"{}")
+    return programa.estado_seguimiento(_almacen.base(), _almacen.items(), hist.get("_seguimiento_ediciones", {}),
+                                       date.fromisoformat(dia))
 
-ext = A.leer_archivo("ultima_busqueda_externa.xlsx")
-if ext:
-    import io
-    reg = json.loads(A.leer_archivo("ultimo_buscar-externo.json") or b"{}")
-    hojas = pd.read_excel(io.BytesIO(ext), sheet_name=None, dtype=str)
-    with st.expander(f"Resultado de la última búsqueda con Gemini ({reg.get('fecha', '')} · {reg.get('usuario', '')})"):
-        st.download_button("Descargar resultado (Excel)", ext, "busqueda_gemini.xlsx", icon=":material/download:")
-        st.markdown("**Descartadas y por qué**")
-        st.dataframe(hojas.get("Descartadas", pd.DataFrame()).fillna(""), hide_index=True, width="stretch")
-        sug = hojas.get("Fuentes sugeridas", pd.DataFrame()).fillna("")
-        if len(sug):
-            st.markdown("**Sitios oficiales nuevos encontrados** (se pueden agregar a la lista de fuentes)")
-            tabla_sugeridas(sug, "sug_gemini", "Búsqueda externa (Gemini)")
-        if st.toggle("Ver detalle técnico", key="det_gemini"):
-            st.code("\n".join(reg.get("log", [])) or "(sin mensajes)")
+
+with st.container(border=True):
+    st.markdown("#### Convocatorias que se repiten cada año")
+    st.write("Las convocatorias de la base que ya cerraron (también las que vinieron de Airtable) se siguen solas: en cada "
+             "búsqueda se vuelve a abrir su página oficial, con más frecuencia en su **temporada** (desde 4 meses antes "
+             "hasta 2 meses después de la fecha en que cerró la edición anterior). Cuando publican la edición nueva, se "
+             "completa **antes que cualquier otra** y llega a Revisar convocatorias. Aquí se ve qué pasó con cada una.")
+    try:
+        _todos = A.items()
+        seg = pd.DataFrame(_tablero_seguimiento(A, len(_todos), date.today().isoformat()))
+    except Exception as e:  # noqa: BLE001
+        seg = pd.DataFrame()
+        st.caption(f"No se pudo calcular el seguimiento: {e}")
+    if len(seg):
+        cuenta = seg["Estado"].value_counts()
+        m = st.columns(4)
+        for col, (estado, lab) in zip(m, [
+                ("Edición nueva ya en el sistema", "con la edición nueva ya encontrada"),
+                ("Revisada: aún sin edición nueva", "revisadas, todavía sin edición nueva"),
+                ("En temporada: se revisa en la próxima búsqueda", "en temporada, por revisar"),
+                ("Sin página oficial para seguirla", "sin página oficial: no se pueden seguir")]):
+            col.metric(lab, int(cuenta.get(estado, 0)))
+        st.caption(f"{len(seg)} convocatorias de la base ya cerraron. "
+                   f"{int(cuenta.get('Fuera de temporada: se revisará al acercarse', 0))} están fuera de temporada y se "
+                   "revisarán cuando se acerque su fecha.")
+        with st.expander("Ver el detalle por convocatoria"):
+            ver = st.multiselect("Estado", sorted(seg["Estado"].unique()), placeholder="Todos", key="seg_estado")
+            buscar_s = st.text_input("Buscar por nombre u oferente", key="seg_buscar", placeholder="Ej.: Carolina, Chevening")
+            vs = seg[seg["Estado"].isin(ver)] if ver else seg
+            if buscar_s:
+                b = buscar_s.lower()
+                vs = vs[vs["Convocatoria"].str.lower().str.contains(b, regex=False) |
+                        vs["Oferente"].str.lower().str.contains(b, regex=False)]
+            st.dataframe(vs, hide_index=True, width="stretch", height=min(420, 38 + 35 * max(len(vs), 1)),
+                         column_config={"Página oficial": st.column_config.LinkColumn(display_text="Abrir ↗")})
+            import io
+            buf = io.BytesIO()
+            seg.to_excel(buf, index=False, sheet_name="Seguimiento")
+            st.download_button("Descargar (Excel)", buf.getvalue(), "seguimiento_ediciones.xlsx",
+                               icon=":material/download:", key="seg_dl")
+        if int(cuenta.get("Sin página oficial para seguirla", 0)):
+            st.caption("Las que no tienen página oficial («Cómo aplicar») no se pueden seguir: complétales el enlace en "
+                       "la base para que entren al seguimiento.")
+    else:
+        st.caption("Todavía no hay convocatorias cerradas en la base para seguir.")
 
 # --- mantenimiento de fuentes -------------------------------------------------------
 st.divider()

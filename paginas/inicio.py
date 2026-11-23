@@ -95,8 +95,9 @@ tarjeta(c[3], len(abiertas), "convocatorias abiertas en la base", f"de {len(por_
 if por_estado["Por completar"]:
     q1, q2 = st.columns([4, 1.1])
     q1.info(f"**{len(por_estado['Por completar'])} convocatorias encontradas esperan completarse** (no están en español o les "
-            "faltan datos). No llegan a la bandeja hasta quedar completas; el sistema las reintenta en cada búsqueda.")
-    q2.page_link("paginas/mapeo.py", label="Ver cuáles", icon=":material/arrow_forward:")
+            "faltan datos). El sistema las reintenta en cada búsqueda, y también se pueden completar a mano en Revisar "
+            "convocatorias → pestaña **Por completar**.")
+    q2.page_link("paginas/bandeja.py", label="Completarlas", icon=":material/arrow_forward:")
 
 if cerradas:
     w1, w2 = st.columns([4, 1.1])

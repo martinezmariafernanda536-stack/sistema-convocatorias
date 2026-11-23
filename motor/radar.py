@@ -47,6 +47,18 @@ _PALABRAS = re.compile(r"scholarship|fellowship|grant|award|prize|funding|fund\b
 _PISTA = re.compile(r"\b(apply|application|official|website|web ?site|more info|more information|learn more|visit|"
                     r"click here|details|read more|aplica|aplicar|postula|sitio oficial|p[aá]gina oficial|"
                     r"m[aá]s informaci[oó]n|link|enlace|here)\b", re.I)
+# «Apply» que lleva a una plataforma de postulación o a un inicio de sesión: no describe la convocatoria
+_PLATAFORMA = re.compile(r"(^|\.)(interfolio\.com|smapply\.[a-z]+|fluxx\.io|submittable\.com|embark\.com|slideroom\.com|"
+                         r"myblueprint|awardspring\.com|academicworks\.com|applyweb\.com|liaisoncas\.com|"
+                         r"commonapp\.org|grantinterface\.com|surveymonkey\.com|typeform\.com|jotform\.com|"
+                         r"qualtrics\.com|formstack\.com|wufoo\.com|zohopublic\.com|cognitoforms\.com|"
+                         r"forms\.office\.com|docs\.google\.com|drive\.google\.com|dropbox\.com|audible\.[a-z.]+|"
+                         r"semantik\.[a-z]+|studentaid\.gov)$", re.I)
+_RUTA_ACCESO = re.compile(r"/(login|log-in|signin|sign-in|sign_in|signup|sign-up|register|registration|account|"
+                          r"apply/?$|applicant|application-portal|portal/?$|auth|sso|cas/login|user/login)(/|\?|$)|"
+                          r"\.(pdf|docx?|xlsx?|pptx?|zip)(\?|$)", re.I)
+_PISTA_INFO = re.compile(r"\b(official|website|web ?site|more info|more information|learn more|details|visit|"
+                         r"sitio oficial|p[aá]gina oficial|m[aá]s informaci[oó]n)\b", re.I)
 _SITIO_OFICIAL = re.compile(r"(\.gov(\.[a-z]{2})?|\.gob(\.[a-z]{2})?|\.go\.[a-z]{2}|\.gouv\.fr|\.govt\.nz|\.gc\.ca|"
                             r"\.admin\.ch|\.gv\.at|\.gov\.br|\.int|europa\.eu|\.un\.org|undp\.org|unesco\.org|unicef\.org|"
                             r"fao\.org|oas\.org|iadb\.org|worldbank\.org|caf\.com)$")
@@ -62,6 +74,12 @@ def descartable(url):
     if not h or "." not in h:
         return True
     if any(h == d or h.endswith("." + d) for d in REDES):
+        return True
+    if _PLATAFORMA.search(h) or _RUTA_ACCESO.search(urlparse(url).path + ("?" if urlparse(url).query else "")):
+        return True
+    if re.match(r"^(apply|login|signin|portal|auth|sso|admissions?-portal|my)\.", h):
+        return True
+    if len(urlparse(url).path.strip("/")) < 3:  # la portada de un sitio no es una convocatoria
         return True
     categoria, _ = D.clasificar(url)
     return categoria in ("ICETEX", "Agregador / intermediario", "Boletín de otra entidad", "Plataforma de postulación")
@@ -125,7 +143,11 @@ def enlaces_oficiales(html, url_pagina, maximo=30):
         if descartable(url):
             continue
         (con_pista if pista else sin_pista).append((url, texto))
+    # primero «Official website / More information» (describen la convocatoria) y después «Apply»
+    con_pista.sort(key=lambda e: not _PISTA_INFO.search(e[1]))
     externos = con_pista or [e for e in sin_pista if D.institucional(e[0])][:2]
+    if len(externos) > 1 and len({_host(u) for u, _ in externos}) == 1:
+        externos = externos[:1]  # varios enlaces al mismo sitio: basta con el que describe la convocatoria
     return externos[:maximo], internos[:maximo]
 
 
@@ -146,7 +168,7 @@ def fuente_para(url, fuentes):
     if f:
         return f
     h = _host(url)
-    return Fuente(id="RAD-" + h, activa=True, tipo=TIPO_DESCUBIERTA, nombre=h, pais="", dominio=h, url_becas=url,
+    return Fuente(id="RAD-" + h, activa=True, tipo=TIPO_DESCUBIERTA, nombre=h, pais="", dominio="https://" + h, url_becas=url,
                   oficial="Oficial" if _SITIO_OFICIAL.search(h) else "No Oficial", idioma="", requiere_navegador=False,
                   fila=0)
 

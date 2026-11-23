@@ -40,8 +40,9 @@ with st.expander("🔎 Buscar convocatorias nuevas", expanded=True):
    convocatorias** (la meta se puede cambiar en las opciones). Las candidatas que no alcanzaron se consideran en la siguiente
    búsqueda. Si no hay 20 nuevas disponibles, el resultado dice por qué.
 5. Lo que ya está registrado este año (aunque tenga otro enlace o el nombre traducido) no vuelve a entrar.
-6. En cada búsqueda también se vuelven a abrir unas 40 convocatorias de la base que ya cerraron, para encontrar su
-   **nueva edición** del año siguiente (seguimiento año tras año).
+6. En cada búsqueda también se vuelven a abrir hasta 60 convocatorias de la base que ya cerraron, para encontrar su
+   **nueva edición** del año siguiente, con más frecuencia cuando se acerca la fecha en que abrieron el año anterior. El
+   recuadro **«Convocatorias que se repiten cada año»** muestra qué pasó con cada una.
 
 **Cada cuánto:** una vez por semana es suficiente. La primera vez tarda más, porque todavía no conoce ninguna convocatoria;
 después solo abre lo nuevo y es mucho más rápida.
@@ -53,12 +54,22 @@ with st.expander("📡 Descubrir convocatorias fuera de las fuentes"):
 2. El sistema lee sitios que publican convocatorias de muchos oferentes (por ejemplo Opportunity Desk) **solo como radar**:
    sigue cada enlace hasta la **página oficial** del oferente y registra únicamente esa. También consulta el portal de
    financiación de la Unión Europea.
-3. Lo encontrado pasa por los mismos filtros y llega a **Revisar convocatorias**.
+3. Lo encontrado pasa por los mismos filtros y llega a **Revisar convocatorias** con el origen **«Descubierta fuera de
+   las fuentes»** (pestaña *Por revisar*, o *Por completar* si le falta algún dato). En el recuadro de Descubrir, los
+   botones **Ver las que llegaron** y **Ver las por completar** abren la lista ya filtrada.
 4. Al terminar aparece la tabla **Fuentes sugeridas**: sitios oficiales nuevos que aportaron convocatorias. El administrador
    marca los que quiere y quedan en la lista de fuentes.
 
 **Qué sitios usa:** se activan, apagan o agregan en la hoja **«Radar»** de la configuración (*Mantenimiento de fuentes →
 Configuración*). **Cada cuánto:** cada dos semanas es suficiente.
+""")
+
+with st.expander("✍️ Completar a mano una convocatoria «Por completar»"):
+    st.markdown("""
+1. En **Revisar convocatorias**, abre la pestaña **Por completar**. La columna **Qué falta** dice qué le faltó.
+2. Marca la fila: se abre la misma ficha de revisión, con todo lo que el sistema ya mapeó.
+3. Abre la página oficial, completa lo que falta (o tradúcelo) y pulsa **Pasar a Por revisar**. También puedes aprobarla
+   directamente o descartarla.
 """)
 
 with st.expander("✅ Revisar una convocatoria"):
