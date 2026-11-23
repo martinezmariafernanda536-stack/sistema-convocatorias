@@ -15,7 +15,7 @@ import html as _html
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse
 
@@ -176,7 +176,8 @@ def fuente_para(url, fuentes):
 # --- portal de la Unión Europea -------------------------------------------------------
 UE_API = "https://api.tech.ec.europa.eu/search-api/prod/rest/search?apiKey=SEDIA"
 UE_TEMA = "https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/topic-details/"
-UE_TEXTOS = ("Colombia", '"Latin America"', '"third countries"', '"international cooperation"', '"developing countries"')
+# Sin comillas: el buscador del portal no devuelve nada con frases entre comillas (comprobado en nov. 2026)
+UE_TEXTOS = ("Colombia", "Latin America", "third countries", "developing countries", "international cooperation")
 UE_CONSULTA = {"bool": {"must": [{"terms": {"type": ["1", "2", "8"]}},              # subvenciones y convocatorias
                                  {"terms": {"status": ["31094501", "31094502"]}}]}}  # por abrir y abiertas
 _ESTADOS_UE = {"31094501": "Por abrir (forthcoming)", "31094502": "Abierta (open for submission)"}
@@ -193,15 +194,17 @@ def _fecha_iso(v):
         return None
 
 
-def _consultar_ue(texto, por_pagina, prueba=None):
+def _consultar_ue(texto, por_pagina, prueba=None, pagina=1):
     if prueba:
         ruta = Path(prueba) / "ue_api.json"
         return json.loads(ruta.read_text(encoding="utf-8")) if ruta.exists() else {"results": []}
     import requests
     blob = lambda v: ("blob", json.dumps(v), "application/json")  # noqa: E731
-    r = requests.post(f"{UE_API}&text={quote(texto)}&pageSize={por_pagina}&pageNumber=1",
+    # Orden descendente: en orden ascendente las primeras páginas se llenan de convocatorias «abiertas» con la fecha ya
+    # vencida (el portal no actualiza su estado) y no queda espacio para las vigentes.
+    r = requests.post(f"{UE_API}&text={quote(texto)}&pageSize={por_pagina}&pageNumber={pagina}",
                       files={"query": blob(UE_CONSULTA), "languages": blob(["en"]),
-                             "sort": blob({"order": "ASC", "field": "deadlineDate"})},
+                             "sort": blob({"order": "DESC", "field": "deadlineDate"})},
                       headers={"Accept": "application/json"}, timeout=60)
     r.raise_for_status()
     return r.json()
@@ -214,28 +217,38 @@ def portal_ue(maximo=30, hoy=None, prueba=None, textos=UE_TEXTOS):
     JavaScript y no se pueden leer como las demás: por eso se usa el texto que entrega su búsqueda."""
     vistos, salida, notas = set(), [], []
     for texto in textos:
-        try:
-            datos = _consultar_ue(texto, 50, prueba)
-        except Exception as e:  # noqa: BLE001 - si el portal no responde, se sigue con lo demás
-            notas.append(f"el portal de la UE no respondió ({str(e)[:80]})")
-            break
-        for res in datos.get("results", []):
-            m = res.get("metadata") or {}
-            ident = _primero(m.get("identifier")) or _primero(m.get("callIdentifier"))
-            titulo = _primero(m.get("title")) or res.get("summary") or ident
-            if not ident or ident in vistos:
-                continue
-            cierre = _fecha_iso(_primero(m.get("deadlineDate")))
-            if hoy and cierre and cierre < hoy:
-                continue
-            vistos.add(ident)
-            url = _primero(m.get("url")) or res.get("url") or UE_TEMA + ident
-            if not str(url).startswith("http"):
-                url = UE_TEMA + ident
-            salida.append((url, titulo, _html_ue(m, titulo, ident, cierre)))
-            if len(salida) >= maximo:
-                return salida, "; ".join(notas)
-    return salida, "; ".join(notas)
+        for pagina in (1, 2):
+            try:
+                datos = _consultar_ue(texto, 50, prueba, pagina)
+            except Exception as e:  # noqa: BLE001 - si el portal no responde, se sigue con lo demás
+                notas.append(f"el portal de la UE no respondió ({str(e)[:80]})")
+                return _mas_cercanas(salida, maximo), "; ".join(notas)
+            resultados = datos.get("results", []) or []
+            vigentes = 0
+            for res in resultados:
+                m = res.get("metadata") or {}
+                ident = _primero(m.get("identifier")) or _primero(m.get("callIdentifier"))
+                titulo = _primero(m.get("title")) or res.get("summary") or ident
+                if not ident or ident in vistos:
+                    continue
+                cierre = _fecha_iso(_primero(m.get("deadlineDate")))
+                if hoy and cierre and cierre < hoy:
+                    continue
+                vigentes += 1
+                vistos.add(ident)
+                url = _primero(m.get("url")) or res.get("url") or UE_TEMA + ident
+                if not str(url).startswith("http"):
+                    url = UE_TEMA + ident
+                salida.append((cierre, url, titulo, _html_ue(m, titulo, ident, cierre)))
+            if prueba or len(resultados) < 50 or not vigentes:  # ya no hay más vigentes en las páginas siguientes
+                break
+    return _mas_cercanas(salida, maximo), "; ".join(notas)
+
+
+def _mas_cercanas(salida, maximo):
+    """Las de cierre más próximo primero (las que no tienen fecha, al final)."""
+    salida.sort(key=lambda x: (x[0] is None, x[0] or date.max))
+    return [(u, t, h) for _, u, t, h in salida[:maximo]]
 
 
 def _html_ue(m, titulo, ident, cierre):

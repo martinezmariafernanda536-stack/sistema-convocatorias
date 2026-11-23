@@ -10,6 +10,9 @@ class Historial:
         self.datos = json.loads(self.ruta.read_text(encoding="utf-8")) if self.ruta.exists() else {}
         self.completas = self.datos.pop("_revision_completa", {})  # fuente -> fecha de la última revisión completa
         self.seguidas = self.datos.pop("_seguimiento_ediciones", {})  # url de la base -> fecha en que se revisó su edición
+        # descubrir: páginas oficiales halladas por el radar que no se alcanzaron a completar (Gemini saturado, cupo…).
+        # La publicación del agregador ya quedó vista, así que sin esta lista no se volverían a encontrar.
+        self.radar_pendientes = self.datos.pop("_radar_pendientes", {})  # url -> {radar, nombre, origen, fecha}
         self.vistas_hoy = set()
 
     def conocidas(self):
@@ -38,6 +41,22 @@ class Historial:
 
     def marcar_seguida(self, url, hoy):
         self.seguidas[url] = hoy
+
+    def pendiente_radar(self, url, radar_id, nombre, origen, hoy):
+        self.radar_pendientes.setdefault(url, {"radar": radar_id, "nombre": nombre, "origen": origen, "fecha": hoy})
+
+    def quitar_pendiente_radar(self, url):
+        self.radar_pendientes.pop(url, None)
+
+    def pendientes_de_radar(self, radar_id, hoy, dias=45):
+        """Las que siguen pendientes (las de más de 45 días se olvidan: la convocatoria seguramente ya cambió)."""
+        from datetime import date
+        vencidas = [u for u, d in self.radar_pendientes.items()
+                    if (date.fromisoformat(hoy) - date.fromisoformat(d.get("fecha", hoy))).days > dias]
+        for u in vencidas:
+            self.radar_pendientes.pop(u)
+        return [(u, d.get("nombre", ""), d.get("origen", "")) for u, d in self.radar_pendientes.items()
+                if d.get("radar") == radar_id]
 
     @staticmethod
     def huella(fila):
@@ -78,5 +97,6 @@ class Historial:
     def guardar(self):
         self.ruta.parent.mkdir(parents=True, exist_ok=True)
         self.ruta.write_text(json.dumps(self.datos | {"_revision_completa": self.completas,
-                                                     "_seguimiento_ediciones": self.seguidas}, ensure_ascii=False, indent=1),
+                                                     "_seguimiento_ediciones": self.seguidas,
+                                                     "_radar_pendientes": self.radar_pendientes}, ensure_ascii=False, indent=1),
                              encoding="utf-8")

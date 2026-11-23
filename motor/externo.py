@@ -39,6 +39,17 @@ CADENA_MODELOS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-
 # modelos con cupo gratuito muy bajo (unas 20 consultas al día): si están configurados, van al final de la cadena
 _CUPO_BAJO = ("gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-pro")
 _AGOTADOS = set()   # modelos que ya agotaron su cupo del día en esta sesión
+
+
+def modelo_configurado(cfg=None):
+    """El secreto GEMINI_MODEL manda. El parámetro «Modelo de Gemini» de la configuración solo se usa si es un modelo con
+    buen cupo: las configuraciones antiguas traen gemini-2.5-flash (retirado; Google lo cambia por uno de ~20 consultas
+    al día), así que en ese caso se usa la cadena de Flash-Lite."""
+    import os
+    if os.environ.get("GEMINI_MODEL"):
+        return os.environ["GEMINI_MODEL"]
+    valor = str((cfg.p("Modelo de Gemini", "") if cfg else "") or "").strip()
+    return MODELO_POR_DEFECTO if not valor or valor.startswith(_CUPO_BAJO) else valor
 ULTIMO_MODELO = {"nombre": ""}
 _RITMO = {"ultima": 0.0, "pausa": 6.5, "fallas": 0}  # Flash-Lite gratuito: ~10 consultas por minuto
 URL_MODELOS = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -53,6 +64,23 @@ def reiniciar_corrida():
     SUSPENDIDO["motivo"] = ""
     _AGOTADOS.clear()
     _RITMO["fallas"] = 0
+    _RITMO["pausas"] = 0
+
+
+def _esperar(segundos):
+    """Espera en tramos cortos; devuelve True si la persona pidió detener la búsqueda mientras tanto."""
+    import time
+    try:
+        import builtins
+        detener = builtins.__dict__.get("_mapeo_detener")
+    except Exception:  # noqa: BLE001
+        detener = None
+    fin = time.time() + segundos
+    while time.time() < fin:
+        if detener is not None and detener.is_set():
+            return True
+        time.sleep(min(2, max(0, fin - time.time())))
+    return False
 
 
 def cadena(modelo):
@@ -98,6 +126,15 @@ def _pedir(cuerpo, clave, modelo, espera, buscar_en_google):
             msg = _mensaje(r)
             if _retirado(r.status_code, msg):
                 nuevo = _modelo_sugerido(msg, clave)
+                if nuevo and nuevo.startswith(_CUPO_BAJO):
+                    # Google sugiere un modelo con muy poco cupo gratuito (y que se satura más): mejor seguir con la
+                    # cadena de Flash-Lite, que es la que aguanta una búsqueda completa
+                    log.warning("El modelo %s ya no está disponible; se sigue con %s.", m,
+                                next((x for x in CADENA_MODELOS if x not in _AGOTADOS), MODELO_POR_DEFECTO))
+                    _REEMPLAZO[m] = MODELO_POR_DEFECTO
+                    _AGOTADOS.add(m)
+                    errores.append(f"{m}: retirado")
+                    break
                 if nuevo and nuevo != m and nuevo not in _AGOTADOS:
                     log.warning("El modelo %s ya no está disponible; se usa %s.", m, nuevo)
                     _REEMPLAZO[m] = nuevo
@@ -542,7 +579,7 @@ def buscar(cfg, lector, icetex, duplicados, catalogo, catalogos, hoy=None, modal
            clave=None, modelo=None):
     hoy = hoy or date.today()
     modalidades = [m for m in (modalidad_de(x) for x in (modalidades or [])) if m] or list(MODALIDADES)
-    modelo = modelo or os.environ.get("GEMINI_MODEL") or str(cfg.p("Modelo de Gemini", MODELO_POR_DEFECTO) or MODELO_POR_DEFECTO)
+    modelo = modelo or modelo_configurado(cfg)
     clave = clave or os.environ.get("GEMINI_API_KEY", "")
     dominios_fuentes = {DOM.host(f.dominio) for f in cfg.fuentes if f.dominio}
     cfg._catalogos = catalogos
@@ -637,7 +674,7 @@ def completar_mapeo(filas, cfg, catalogos, hoy, clave=None, modelo=None, maximo=
     if not clave and not os.environ.get("MAPEO_GEMINI_PRUEBA_COMPLETAR"):
         log.info("Sin clave de Gemini: las convocatorias quedan con los campos leídos en la página.")
         return 0
-    modelo = modelo or os.environ.get("GEMINI_MODEL") or str(cfg.p("Modelo de Gemini", MODELO_POR_DEFECTO) or MODELO_POR_DEFECTO)
+    modelo = modelo or modelo_configurado(cfg)
     pausa = float(cfg.p("Pausa entre consultas a Gemini (segundos)", 6.5) or 0)
     _RITMO["pausa"] = max(pausa, 4.0)
     if maximo is None:
@@ -648,8 +685,22 @@ def completar_mapeo(filas, cfg, catalogos, hoy, clave=None, modelo=None, maximo=
     hechas = 0
     for i, fila in enumerate(pendientes):
         try:
-            texto, _ = llamar(prompt_completar(fila["_texto"], fila["Nombre de la Convocatoria"], fila["Cómo aplicar"],
-                                               catalogos, fila["Modalidad"]), clave, modelo, buscar_en_google=False)
+            try:
+                texto, _ = llamar(prompt_completar(fila["_texto"], fila["Nombre de la Convocatoria"], fila["Cómo aplicar"],
+                                                   catalogos, fila["Modalidad"]), clave, modelo, buscar_en_google=False)
+            except ErrorGemini as e:
+                # Google saturado en todos los modelos: suele pasar en ratos. Se espera y se reintenta la misma
+                # convocatoria (1, 2 y 4 minutos, como mucho tres veces por búsqueda) antes de dejarlo para la próxima.
+                if "saturado" not in str(e) or _RITMO.get("pausas", 0) >= 3 or SUSPENDIDO["motivo"]:
+                    raise
+                minutos = 2 ** _RITMO.get("pausas", 0)
+                _RITMO["pausas"] = _RITMO.get("pausas", 0) + 1
+                log.warning("Gemini está saturado en este momento (lo indica Google). Se espera %d min y se reintenta…",
+                            minutos)
+                if _esperar(60 * minutos):
+                    break  # la persona pidió detener la búsqueda
+                texto, _ = llamar(prompt_completar(fila["_texto"], fila["Nombre de la Convocatoria"], fila["Cómo aplicar"],
+                                                   catalogos, fila["Modalidad"]), clave, modelo, buscar_en_google=False)
             c = leer_objeto(texto)
         except (ErrorGemini, requests.RequestException) as e:
             if SUSPENDIDO["motivo"] or "429" in str(e):  # clave, modelo o límite: no seguir insistiendo
@@ -660,7 +711,8 @@ def completar_mapeo(filas, cfg, catalogos, hoy, clave=None, modelo=None, maximo=
             log.warning("Gemini no pudo completar «%s»: %s", fila["Nombre de la Convocatoria"][:60], str(e)[:200])
             _RITMO["fallas"] += 1
             if _RITMO["fallas"] >= 4:  # varias seguidas: Google está saturado; no gastar la corrida esperando
-                SUSPENDIDO["motivo"] = "Gemini está saturado (varias consultas seguidas sin respuesta)"
+                SUSPENDIDO["motivo"] = ("Gemini está saturado (Google no responde en ningún modelo, aun después de esperar). "
+                                        "No es un error del sistema")
                 log.warning("%s: lo que falta se completa en la próxima búsqueda.", SUSPENDIDO["motivo"])
                 break
             continue
@@ -682,7 +734,7 @@ def probar(clave=None, modelo=None, cfg=None):
     clave = clave or os.environ.get("GEMINI_API_KEY", "")
     if not clave:
         return False, "", "No hay clave de Gemini: agrega GEMINI_API_KEY en los secretos de Streamlit."
-    modelo = modelo or os.environ.get("GEMINI_MODEL") or (str(cfg.p("Modelo de Gemini", MODELO_POR_DEFECTO)) if cfg else MODELO_POR_DEFECTO)
+    modelo = modelo or modelo_configurado(cfg)
     reiniciar_corrida()
     try:
         texto, _ = llamar('Responde solo con este JSON: {"ok": true, "idioma": "español"}', clave, modelo, espera=60,
@@ -694,7 +746,7 @@ def probar(clave=None, modelo=None, cfg=None):
         claro = ("La clave de Gemini no es válida: revisa GEMINI_API_KEY en los secretos." if "API key not valid" in t or " 400" in t and "key" in t.lower() else
                  "La clave no tiene permiso para usar este modelo." if " 403" in t else
                  "Se alcanzó el límite de consultas de Gemini (por minuto o por día). Espera un rato o mañana." if " 429" in t else
-                 "El modelo no está disponible: pon GEMINI_MODEL = \"gemini-3.8-flash\" en los secretos." if " 404" in t else
+                 "El modelo no está disponible: borra el secreto GEMINI_MODEL (si lo hay) para usar la cadena de Flash-Lite." if " 404" in t else
                  "No se pudo conectar con Gemini." if isinstance(e, requests.RequestException) else "Gemini no respondió bien.")
         return False, _REEMPLAZO.get(modelo, modelo), f"{claro} Detalle: {t[:300]}"
     usado = ULTIMO_MODELO["nombre"] or _REEMPLAZO.get(modelo, modelo)

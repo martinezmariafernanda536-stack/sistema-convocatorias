@@ -172,7 +172,7 @@ def revisar_version():
     faltan = []
     try:
         import mapeo as programa
-        if getattr(programa, "VERSION", "") < "2026-11-23j":
+        if getattr(programa, "VERSION", "") < "2026-11-23m":
             faltan.append("mapeo.py")
         if importlib.util.find_spec("motor.radar") is None:
             faltan.append("motor/radar.py")

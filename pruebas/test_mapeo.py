@@ -893,3 +893,107 @@ def test_secciones_rapido_en_paginas_grandes():
     r = extraer.secciones(html, "https://x.org/becas", cfg.palabras_beca)
     assert len(r) == 250 and all("15 de marzo" in c for _, _, c in r)
     assert time.time() - t < 10
+
+
+def test_gemini_saturado_espera_y_reintenta(monkeypatch):
+    """Si Google está saturado en todos los modelos, se espera y se reintenta la misma convocatoria en vez de rendirse."""
+    from motor import externo
+    externo.reiniciar_corrida()
+    llamadas = []
+
+    def llamar(*a, **k):
+        llamadas.append(1)
+        if len(llamadas) == 1:
+            raise externo.ErrorGemini("Gemini no respondió: gemini-3.5-flash-lite: saturado (503)")
+        return ('{"es_convocatoria": true, "colombia": "sí"}', None)
+    esperas = []
+    monkeypatch.setattr(externo, "llamar", llamar)
+    monkeypatch.setattr(externo, "_esperar", lambda s: esperas.append(s) or False)
+    monkeypatch.setattr(externo, "completar", lambda *a, **k: [])
+    monkeypatch.setenv("GEMINI_API_KEY", "x")
+    from motor import config as C
+    fila = {"_texto": "texto " * 50, "Nombre de la Convocatoria": "Beca X", "Cómo aplicar": "https://x.org", "Modalidad": "Beca",
+            "[Sistema] Evidencia de Gemini en la página": ""}
+    externo.completar_mapeo([fila], C.cargar(), {}, date(2026, 11, 23), maximo=1)
+    assert len(llamadas) == 2 and esperas == [60] and "_veredicto" in fila
+    externo.reiniciar_corrida()
+
+
+def test_modelo_retirado_no_salta_a_uno_de_poco_cupo(monkeypatch):
+    """Si GEMINI_MODEL apunta a un modelo retirado y Google sugiere 3.8 Flash (20 consultas al día), se sigue con Flash-Lite."""
+    from motor import externo
+    externo.reiniciar_corrida()
+    externo._REEMPLAZO.clear()
+    usados = []
+
+    class R:
+        def __init__(self, codigo, cuerpo):
+            self.status_code, self._c, self.text = codigo, cuerpo, str(cuerpo)
+
+        def json(self):
+            return self._c
+
+    def post(url, **k):
+        modelo = url.split("/models/")[1].split(":")[0]
+        usados.append(modelo)
+        if modelo == "gemini-2.5-flash":
+            return R(404, {"error": {"message": "models/gemini-2.5-flash is not found. Please use models/gemini-3.8-flash"}})
+        return R(200, {"candidates": [{"content": {"parts": [{"text": "{}"}]}}]})
+    monkeypatch.setattr(externo.requests, "post", post)
+    monkeypatch.setattr(externo, "_RITMO", {"ultima": 0.0, "pausa": 0, "fallas": 0, "pausas": 0})
+    externo._pedir({}, "clave", "gemini-2.5-flash", 5, False)
+    assert usados[0] == "gemini-3.5-flash-lite" or usados[:2] == ["gemini-2.5-flash", "gemini-3.5-flash-lite"]
+    assert "gemini-3.8-flash" not in usados
+    externo.reiniciar_corrida()
+    externo._REEMPLAZO.clear()
+
+
+def test_radar_reintenta_las_paginas_oficiales_que_no_se_completaron(tmp_path):
+    """Si Gemini no respondió, la página oficial queda guardada: la publicación del agregador ya se marcó como vista y,
+    sin esta lista, la convocatoria no se volvería a encontrar."""
+    import argparse
+    from motor import config as C
+    from motor import reglas as RG
+    from motor.historial import Historial
+    h = Historial(tmp_path / "h.json")
+    h.pendiente_radar("https://www.fundacionejemplo.org/becas/liderazgo-2027", "RAD-OD", "Beca", "publicación X", "2026-11-09")
+    h.pendiente_radar("https://vieja.org/beca", "RAD-OD", "Vieja", "", "2026-08-01")
+    h.guardar()
+    h = Historial(tmp_path / "h.json")
+    pend = h.pendientes_de_radar("RAD-OD", "2026-11-23")
+    assert [u for u, _, _ in pend] == ["https://www.fundacionejemplo.org/becas/liderazgo-2027"]  # la de 45+ días se olvida
+    assert h.pendientes_de_radar("RAD-S4D", "2026-11-23") == []
+    cfg = C.cargar()
+    od = next(r for r in cfg.radar if r.id == "RAD-OD")
+    args = argparse.Namespace(hoy=date(2026, 11, 9), prueba=str(PAGINAS), pausa=0, todas=False)
+    primera = programa.revisar_radar(od, cfg, args, _SinIcetex(), RG.IndiceAirtable(None, 90))
+    res = programa.revisar_radar(od, cfg, args, _SinIcetex(), RG.IndiceAirtable(None, 90),
+                                 frozenset(primera["sin_cambios"]), pend)
+    assert [u for _, u, _, _ in res["hallazgos"]] == ["https://www.fundacionejemplo.org/becas/liderazgo-2027"]
+
+
+def test_portal_ue_sin_comillas_y_primero_las_de_cierre_cercano(monkeypatch):
+    from motor import radar as R
+    pedidos = []
+    def falso(texto, por_pagina, prueba=None, pagina=1):
+        pedidos.append(texto)
+        m = lambda i, d: {"metadata": {"identifier": [i], "title": [i], "deadlineDate": [d]}}  # noqa: E731
+        return {"results": [m("LEJANA", "2027-09-01"), m("CERCANA", "2026-12-01"), m("VENCIDA", "2025-01-01")]}
+    monkeypatch.setattr(R, "_consultar_ue", falso)
+    items, _ = R.portal_ue(5, date(2026, 11, 23))
+    assert not any('"' in t for t in pedidos)
+    assert [t for _, t, _ in items] == ["CERCANA", "LEJANA"]
+
+
+def test_modelo_antiguo_de_la_configuracion_no_se_usa(monkeypatch):
+    """Las configuraciones guardadas antes traen «Modelo de Gemini» = gemini-2.5-flash (retirado y de poco cupo)."""
+    from motor import externo as X
+    class Cfg:
+        def __init__(self, v): self.v = v
+        def p(self, k, d=None): return self.v
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    assert X.modelo_configurado(Cfg("gemini-2.5-flash")) == X.MODELO_POR_DEFECTO
+    assert X.modelo_configurado(Cfg("gemini-3.8-flash")) == X.MODELO_POR_DEFECTO
+    assert X.modelo_configurado(Cfg("gemini-3.1-flash-lite")) == "gemini-3.1-flash-lite"
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-x")
+    assert X.modelo_configurado(Cfg("gemini-2.5-flash")) == "gemini-x"

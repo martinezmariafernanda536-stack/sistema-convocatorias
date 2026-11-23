@@ -497,12 +497,16 @@ def revisar_fuente(fuente, cfg, args, icetex, duplicados, conocidas=frozenset(),
             "sin_cambios": sin_cambios, "completa": completa}
 
 
-def revisar_radar(radar, cfg, args, icetex, duplicados, conocidas=frozenset()):
+def revisar_radar(radar, cfg, args, icetex, duplicados, conocidas=frozenset(), pendientes=()):
     """Descubrir: lee un agregador (solo como radar) o el portal de la UE y analiza las páginas OFICIALES que encuentra."""
     from motor import radar as R
     lector = crear_lector(cfg, args)
     res = {"paginas": [], "nota": "", "analizadas": 0, "leida": False, "hallazgos": [], "sin_cambios": [], "completa": False}
     objetivos = {}  # url oficial -> (nombre, html ya armado o None, origen)
+    for url, nombre, origen in pendientes:  # las que la búsqueda anterior no alcanzó a completar
+        if url not in conocidas:
+            objetivos[url] = (nombre, None, origen)
+    res["reintentadas"] = len(objetivos)
     if radar.tipo == R.TIPO_UE:
         maximo = int(cfg.p("Convocatorias del portal de la UE por búsqueda", 30) or 30)
         items, nota = R.portal_ue(maximo, args.hoy, getattr(args, "prueba", None))
@@ -639,6 +643,9 @@ def mapear(cfg, args):
             log.info("Seguimiento de ediciones: se vuelven a abrir %d convocatorias de la base ya cerradas, para ver si "
                      "publicaron una nueva edición (primero las que están en su temporada de apertura).", total)
     extra = [f for f, _ in seguir.values() if f not in fuentes] + radares
+    pend_radar = {r.id: historial.pendientes_de_radar(r.id, hoy.isoformat()) for r in radares}
+    if (n_pend := sum(len(v) for v in pend_radar.values())):
+        log.info("Se vuelven a intentar %d páginas oficiales que la búsqueda anterior encontró y no alcanzó a completar.", n_pend)
 
     # 1. recorrer las fuentes y reunir candidatas (todavía no se guarda nada en la bandeja)
     filas, descartadas, resumen, leidas, vistas, pool = [], [], [], set(), set(), []
@@ -647,7 +654,8 @@ def mapear(cfg, args):
     seg_tot = [0, 0]
     def tarea(f):
         if f in radares:
-            return revisar_radar(f, cfg, args, icetex, duplicados, conocidas)
+            return revisar_radar(f, cfg, args, icetex, duplicados, conocidas,
+                                 [] if f.tipo == "Portal de la Unión Europea" else pend_radar.get(f.id, []))
         return revisar_fuente(f, cfg, args, icetex, duplicados, conocidas, completa.get(f.id, False),
                               seguir.get(f.id, (f, []))[1])
     for fuente, res in en_paralelo(cfg, args, todas, tarea):
@@ -680,6 +688,8 @@ def mapear(cfg, args):
             fila["[Sistema] Estado"] = estado
             fila["_url"], fila["_enlace"] = url, enlace
             fila["_fuente"] = fila.get("[Sistema] Fuente ID") or fuente.id  # en el radar, el sitio oficial (no el agregador)
+            if fuente in radares:
+                fila["_radar"] = fuente.id
             fila["[Sistema] Resultado"] = "Para la próxima búsqueda (no alcanzó el cupo de esta)"
             pool.append(fila)
             revision += 1
@@ -815,12 +825,32 @@ def mapear(cfg, args):
         log.info("%d candidatas se descartaron sin gastar consultas a Gemini (noticias, ganadores, resultados o ediciones "
                  "pasadas).", sin_consultar)
     if CONTEO["bandeja"] < meta and not getattr(args, "sin_bandeja", False):
+        if usar_gemini and externo.SUSPENDIDO.get("motivo") and not motivo_fin:
+            motivo_fin = ("Gemini (Google) no estaba respondiendo; lo que faltó se intenta de nuevo en la próxima búsqueda"
+                          if any(str(f["[Sistema] Resultado"]).startswith(("Para la próxima", "Incompleta")) for f in pool)
+                          else "")
         motivo_fin = motivo_fin or ("no había más candidatas nuevas en las fuentes" if usar_gemini else
                                     "Gemini está apagado: solo pasa lo que ya está en español y completo")
         log.warning("Llegaron %d de las %d convocatorias completas buscadas: %s.", CONTEO["bandeja"], meta, motivo_fin)
+    if descubrir:  # lo que no se alcanzó a completar se vuelve a intentar en el próximo descubrimiento
+        n_pend = 0
+        for f in pool:
+            if not f.get("_radar"):
+                continue
+            if str(f["[Sistema] Resultado"]).startswith(("Para la próxima", "Incompleta")):
+                historial.pendiente_radar(f["_url"], f["_radar"], f.get("Nombre de la Convocatoria", ""),
+                                          f.get("[Sistema] Página donde se encontró", ""), hoy.isoformat())
+                n_pend += 1
+            else:
+                historial.quitar_pendiente_radar(f["_url"])
+        historial.guardar()
+        _avisar("historial", historial.ruta)
+        if n_pend:
+            log.info("%d páginas oficiales quedan guardadas para el próximo «Descubrir» (no se alcanzaron a completar en "
+                     "esta).", n_pend)
     filas = [f for f in pool if f["[Sistema] Resultado"] != "Descartada al leerla"]  # el reporte muestra todo lo encontrado
     for f in pool:
-        for c in ("_texto", "_url", "_enlace", "_fuente", "_veredicto"):
+        for c in ("_texto", "_url", "_enlace", "_fuente", "_veredicto", "_radar"):
             f.pop(c, None)
 
     retiradas = historial.retiradas(leidas)
@@ -1113,6 +1143,9 @@ def completar_pendientes(cfg, args, hoy=None, maximo=None):
         fila["[Sistema] Estado"] = "Nueva"
         if fila["_texto"]:
             externo.completar_mapeo([fila], cfg, CATALOGOS, hoy, maximo=1)
+            if "_veredicto" not in fila:
+                # Gemini no respondió (saturado, sin cupo): no cuenta como intento; queda igual para la próxima
+                continue
         datos = {k: fila[k] for k in fila if not k.startswith(("_", "[Sistema]"))}
         tipo, otro = indice.buscar(datos, excluir=item["datos"])
         if tipo in ("mismo_año", "nombre_mismo_año"):  # ya traducida, resultó ser una que ya estaba
@@ -1344,7 +1377,7 @@ def externo_reiniciar():
 
 
 # ---------------------------------------------------------------------------
-VERSION = "2026-11-23j"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
+VERSION = "2026-11-23m"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
 
 
 class _Argumentos(argparse.ArgumentParser):
