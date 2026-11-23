@@ -1344,7 +1344,7 @@ def externo_reiniciar():
 
 
 # ---------------------------------------------------------------------------
-VERSION = "2026-11-23h"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
+VERSION = "2026-11-23j"  # la pantalla de búsqueda la compara para avisar si faltan archivos por actualizar
 
 
 class _Argumentos(argparse.ArgumentParser):

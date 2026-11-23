@@ -843,3 +843,32 @@ def test_manifiesto_detecta_archivos_mezclados(tmp_path, monkeypatch):
     monkeypatch.setattr(manifiesto, "RAIZ", copia)
     monkeypatch.setattr(manifiesto, "RUTA", copia / "manifiesto.json")
     assert manifiesto.revisar()[1] == ["calidad/reglas.py"]
+
+
+def test_historial_se_sube_a_github_como_mucho_cada_dos_minutos(monkeypatch, tmp_path):
+    """Durante la búsqueda el historial cambia cientos de veces; subirlo cada vez hacía lenta la búsqueda."""
+    import tareas
+    import mapeo as programa
+    subidas = []
+
+    class Falso:
+        def leer_archivo(self, n):
+            return None
+
+        def guardar_archivo(self, n, b):
+            subidas.append(n)
+
+    capturado = {}
+    monkeypatch.setenv("MAPEO_HISTORIAL", str(tmp_path / "otro.json"))  # _correr la cambia: se restaura al terminar
+    monkeypatch.setattr(programa, "main", lambda args: capturado.setdefault("f", programa.AL_GUARDAR) and None)
+    monkeypatch.setattr(tareas, "_guardar_registro", lambda *a: None)
+    monkeypatch.setattr(tareas, "modulos_desactualizados", lambda: [])
+    t = tareas.Tarea("mapear", "Búsqueda", "Natalia")
+    tareas._correr(Falso(), t, [], open(RAIZ / "config" / "configuracion_mapeo_becas.xlsx", "rb").read())
+    assert "f" in capturado, t.lineas[-5:]
+    f = capturado["f"]
+    h = tmp_path / "h.json"
+    h.write_text("{}")
+    for _ in range(50):
+        f("historial", h)
+    assert subidas.count("historial_mapeo.json") == 1

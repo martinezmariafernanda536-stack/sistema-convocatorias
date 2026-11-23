@@ -1,4 +1,5 @@
 """Funciones para leer texto: palabras clave, fechas, montos, correos e idiomas."""
+import functools
 import re
 import unicodedata
 from datetime import date
@@ -45,12 +46,16 @@ def normalizar(t):
     return re.sub(r"\s+", " ", sin_tildes(str(t or "")).lower()).strip()
 
 
+@functools.lru_cache(maxsize=8192)
+def _patron_termino(termino):
+    t = normalizar(termino)
+    return re.compile(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])") if t else None
+
+
 def contiene(texto_norm, termino):
     """Busca el término como palabra o frase completa (no dentro de otra palabra)."""
-    t = normalizar(termino)
-    if not t:
-        return False
-    return re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", texto_norm) is not None
+    patron = _patron_termino(termino)
+    return patron is not None and patron.search(texto_norm) is not None
 
 
 def alguno(texto_norm, terminos):

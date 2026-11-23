@@ -282,6 +282,19 @@ def _es_generico(titulo_norm):
     return any(titulo_norm.startswith(g) or f" {g}" in titulo_norm[:25] for g in _GENERICOS)
 
 
+def _hermanos_elementos(encabezado):
+    """Los elementos que siguen a un encabezado hasta el próximo encabezado del mismo nivel o superior."""
+    nivel = int(encabezado.name[1]) if re.fullmatch(r"h\d", encabezado.name or "") else 6
+    partes = []
+    for h in encabezado.find_next_siblings():
+        if re.fullmatch(r"h\d", h.name or "") and int(h.name[1]) <= nivel:
+            break
+        if h.find(re.compile(rf"^h[1-{nivel}]$")):
+            break
+        partes.append(h)
+    return partes
+
+
 def _hermanos_hasta(encabezado):
     """HTML de lo que sigue a un encabezado hasta el próximo encabezado del mismo nivel o superior."""
     nivel = int(encabezado.name[1]) if re.fullmatch(r"h\d", encabezado.name or "") else 6
@@ -293,23 +306,6 @@ def _hermanos_hasta(encabezado):
             break
         partes.append(str(h))
     return "".join(partes)
-
-
-def _bloque_propio(h, encabezados, terminos):
-    """El elemento más grande que contiene el encabezado `h` y ningún otro encabezado de otra convocatoria."""
-    def nombre(e):
-        return tx.normalizar(_limpiar_seccion(e.get_text(" ")))
-    propio = nombre(h)
-    otros = [e for e in encabezados if e is not h and nombre(e) != propio and tx.alguno(nombre(e), terminos)
-             and not _es_generico(nombre(e))]
-    ancestros = {id(e): {id(a) for a in e.parents} for e in otros}
-    bloque, actual = None, h
-    while actual.parent is not None and actual.parent.name not in ("body", "html", "[document]"):
-        padre = actual.parent
-        if any(id(padre) in a for a in ancestros.values()):
-            break
-        bloque = actual = padre
-    return bloque
 
 
 def secciones(html, url, terminos, minimo=2):
@@ -354,28 +350,50 @@ def secciones(html, url, terminos, minimo=2):
     # 3. secciones con encabezado (h2–h4) seguidas de su contenido
     if len(salida) < minimo:
         encabezados = sopa.find_all(["h2", "h3", "h4"])
+        nombres = {id(h): tx.normalizar(_limpiar_seccion(h.get_text(" "))) for h in encabezados}
+        # para cada elemento, los títulos de convocatoria que tiene dentro (se calcula una sola vez: rápido aun con
+        # cientos de becas en la misma página)
+        titulos_bajo = {}
+        for h in encabezados:
+            n = nombres[id(h)]
+            if tx.alguno(n, terminos) and not _es_generico(n):
+                for anc in h.parents:
+                    titulos_bajo.setdefault(id(anc), set()).add(n)
+
+        def bloque_propio(h):
+            """El elemento más grande que contiene este título y ningún título de otra convocatoria."""
+            propio, bloque, actual = nombres[id(h)], None, h
+            while actual.parent is not None and actual.parent.name not in ("body", "html", "[document]"):
+                if titulos_bajo.get(id(actual.parent), set()) - {propio}:
+                    break
+                bloque = actual = actual.parent
+            return bloque
+
         mejores, orden = {}, []  # el mismo título puede repetirse (menú de pestañas, versión móvil): se usa el más completo
         for h in encabezados:
             ancla = h.get("id") or (h.parent.get("id") if h.parent is not None and h.parent.name in ("section", "div", "article") else None)
-            propio = _hermanos_hasta(h)
-            bloque = _bloque_propio(h, encabezados, terminos)
+            hermanos = _hermanos_elementos(h)
+            largo = sum(len(e.get_text(" ")) for e in hermanos)
+            contenido = None
+            bloque = bloque_propio(h)
             # en páginas con pestañas internas («Requisitos», «Procesos y fechas»…) lo que sigue al título es solo la
             # presentación: el bloque que lo contiene trae todas las pestañas, también las ocultas
-            if bloque is not None and len(bloque.get_text(" ")) > len(_sopa(propio).get_text(" ")) + 80:
-                propio = str(bloque)
-            clave = tx.normalizar(_limpiar_seccion(h.get_text(" ")))
-            largo = len(_sopa(propio).get_text(" "))
+            if bloque is not None:
+                largo_bloque = len(bloque.get_text(" "))
+                if largo_bloque > largo + 80:
+                    contenido, largo = bloque, largo_bloque
+            clave = nombres[id(h)]
             if clave not in mejores:
                 orden.append(clave)
-                mejores[clave] = [h.get_text(" "), ancla, propio, largo]
+                mejores[clave] = [h.get_text(" "), ancla, contenido if contenido is not None else hermanos, largo]
             else:
                 m = mejores[clave]
                 m[1] = m[1] or ancla
                 if largo > m[3]:
-                    m[2], m[3] = propio, largo
+                    m[2], m[3] = (contenido if contenido is not None else hermanos), largo
         for clave in orden:
             titulo, ancla, propio, _ = mejores[clave]
-            agregar(titulo, ancla, propio)
+            agregar(titulo, ancla, "".join(str(e) for e in propio) if isinstance(propio, list) else str(propio))
     if len(salida) < minimo:
         return []
     return salida

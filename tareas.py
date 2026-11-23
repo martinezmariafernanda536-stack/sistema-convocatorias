@@ -169,11 +169,18 @@ def _correr(almacen, tarea, extra, config):
         (tmp / "historial.json").write_bytes(hist)
     os.environ["MAPEO_HISTORIAL"] = str(tmp / "historial.json")
 
+    ultimo = {"historial": 0.0}
+
     def al_guardar(tipo, ruta):
         if tipo == "config":
             almacen.guardar_archivo(CFG, Path(ruta).read_bytes())
         elif tipo == "historial" and Path(ruta).exists():
-            almacen.guardar_archivo("historial_mapeo.json", Path(ruta).read_bytes())
+            # el historial se guarda en el servidor después de cada fuente y de cada consulta, pero subirlo a GitHub
+            # cada vez (varios cientos por búsqueda) hace lenta la búsqueda y puede chocar con los límites de GitHub:
+            # se sube como mucho cada 2 minutos, y siempre al terminar
+            if time.time() - ultimo["historial"] >= 120:
+                almacen.guardar_archivo("historial_mapeo.json", Path(ruta).read_bytes())
+                ultimo["historial"] = time.time()
 
     programa.ALMACEN, programa.AL_GUARDAR = almacen, al_guardar
     programa.DETENER.clear()

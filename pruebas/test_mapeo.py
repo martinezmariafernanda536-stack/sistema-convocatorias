@@ -877,3 +877,19 @@ def test_fechas_de_cada_ano_sin_ano_toman_el_proximo_cierre():
             "para el semestre de invierno y del 1 de junio al 30 de noviembre para el de verano."}
     externo._coherencia_de_fechas(fila, date(2026, 12, 5))
     assert fila["Fecha Límite de Aplicación"] == "31/5/2027"
+
+
+def test_secciones_rapido_en_paginas_grandes():
+    """Una página con cientos de becas no puede tardar minutos en separarse (eso detenía la búsqueda)."""
+    import time
+    from motor import config as C
+    from motor import extraer
+    cfg = C.cargar()
+    html = "<html><body><main><h2>Becas</h2>" + "".join(
+        f"<div><h3>Beca número {i} para estudiantes internacionales</h3><p>{'Texto descriptivo. ' * 15}</p>"
+        f"<div><h4>Requisitos</h4><p>{'Requisito. ' * 20}</p><h4>Fechas</h4><p>Cierre: 15 de marzo de 2027</p></div></div>"
+        for i in range(250)) + "</main></body></html>"
+    t = time.time()
+    r = extraer.secciones(html, "https://x.org/becas", cfg.palabras_beca)
+    assert len(r) == 250 and all("15 de marzo" in c for _, _, c in r)
+    assert time.time() - t < 10
