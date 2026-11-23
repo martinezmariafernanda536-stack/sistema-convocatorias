@@ -65,11 +65,13 @@ n_actores_pend = sum(1 for f in catalogo_filas if f["estado_ciclope"] != "Creado
 t_rev, t_comp, t_act, t_reg, t_pub, t_desc, t_cat = st.tabs([
     f"Por revisar ({len(por_estado['Por revisar'])})", f"Por completar ({len(por_estado['Por completar'])})",
     f"Actores pendientes ({n_actores_pend} · {len(por_estado['Actor pendiente de crear'])} en espera)",
-    "Registrar convocatoria", f"En la base ({len(por_estado['Aprobada'])})", f"Descartadas ({len(por_estado['Descartada'])})",
+    "Registrar convocatoria", f"En la base ({len(por_estado['Aprobada'])})", f"Descartadas y anuladas ({len(por_estado['Descartada'])})",
     "Catálogo de actores"])
 
 def _origen(i):
     o = i["origen"]
+    if i.get("meta", {}).get("completar_a_mano") and i.get("estado") != "Aprobada":
+        return "Para completar a mano"
     if o.startswith("Descubrimiento") or "· RAD-" in o:
         return "Descubierta fuera de las fuentes"
     if o.startswith("Mapeo automático · nueva edición") or "· SEG-" in o:
@@ -97,7 +99,8 @@ def _fila_triaje(i, hoy):
             "Llegó": i["ingreso"][:10], "Página": d.get("Cómo aplicar", "") if str(d.get("Cómo aplicar", "")).startswith("http") else None}
 
 
-ORIGENES = ["Mapeo automático", "Seguimiento de ediciones", "Descubierta fuera de las fuentes", "Registro manual", "Airtable"]
+ORIGENES = ["Para completar a mano", "Mapeo automático", "Seguimiento de ediciones", "Descubierta fuera de las fuentes",
+            "Registro manual", "Airtable"]
 
 
 def kpis(zona, v, tabla, hoy, completar):
@@ -230,6 +233,9 @@ def lista_de_trabajo(todas, pref, completar=False):
                 st.caption("Mostrando la primera de la lista. Marca otra fila en la tabla para cambiarla.")
             item = next(i for i in todas if i["id"] == sel)
             st.markdown(f"### {item['datos'].get('Nombre de la Convocatoria', '(sin nombre)')}")
+            if item.get("meta", {}).get("completar_a_mano") and item["meta"].get("faltantes"):
+                st.warning("**Para completar a mano.** El sistema ya llenó lo que encontró en la página; le faltaba: "
+                           + "; ".join(item["meta"]["faltantes"])[:500])
             izq, der = st.columns([1.9, 1])
             with izq:
                 datos = formulario(CTX, item["datos"], f"r_{item['id']}_")
@@ -377,12 +383,57 @@ with t_pub:
                                     "Origen": i["origen"]} for i in aprobadas]), hide_index=True, width="stretch")
 
 with t_desc:
-    desc = por_estado["Descartada"]
+    st.write("Aquí quedan las convocatorias **descartadas** (en la revisión, en Por completar o retiradas de la base) y "
+             "las **anuladas** (borradas del sistema, por ejemplo al vaciar la lista de Por completar). Si alguna se quitó "
+             "por error, márcala y **restáurala**: vuelve a donde estaba.")
+    buscar_d = st.text_input("Buscar por nombre u oferente", key="desc_buscar", placeholder="Ej.: Carolina, DAAD")
+    coincide = lambda d: (not buscar_d or buscar_d.lower() in (str(d.get("Nombre de la Convocatoria", "")) + " "  # noqa: E731
+                                                              + str(d.get("Nombre de la Fuente", ""))).lower())
+    desc = [i for i in por_estado["Descartada"] if coincide(i["datos"])]
+    st.markdown(f"##### Descartadas ({len(por_estado['Descartada'])})")
     if desc:
-        st.dataframe(pd.DataFrame([{"Convocatoria": i["datos"].get("Nombre de la Convocatoria"), "Motivo": i.get("observacion", ""),
-                                    "Origen": i["origen"], "Ingreso": i["ingreso"]} for i in desc]), hide_index=True, width="stretch")
+        def _quien(i, accion=("Descartada", "Retirada de la base")):
+            ev = next((e for e in reversed(i.get("historial", [])) if e.get("accion") in accion), {})
+            return ev.get("usuario", ""), str(ev.get("fecha", ""))[:16]
+        tabla_d = pd.DataFrame([{"id": i["id"], "Convocatoria": i["datos"].get("Nombre de la Convocatoria"),
+                                 "Oferente": i["datos"].get("Nombre de la Fuente", ""), "Motivo": i.get("observacion", ""),
+                                 "Estaba en": i.get("meta", {}).get("estado_anterior", "") or "—",
+                                 "Quién": _quien(i)[0], "Cuándo": _quien(i)[1], "Origen": _origen(i)} for i in desc])
+        tabla_d = tabla_d.sort_values("Cuándo", ascending=False)
+        ev_d = st.dataframe(tabla_d.drop(columns="id"), hide_index=True, width="stretch", on_select="rerun",
+                            selection_mode="multi-row", key="tabla_desc", height=min(420, 38 + 35 * len(tabla_d)))
+        marc_d = [tabla_d.iloc[n]["id"] for n in (ev_d.selection.rows if ev_d and ev_d.selection else [])]
+        if PUEDE_REVISAR and st.button(f"Restaurar las marcadas ({len(marc_d)})", disabled=not marc_d,
+                                       icon=":material/restore:", key="rest_desc"):
+            with A.lote(f"Restauradas {len(marc_d)} convocatorias"):
+                destinos = [F.restaurar(A, i, YO["nombre"]) for i in desc if i["id"] in marc_d]
+            st.session_state["aviso"] = (f"{len(destinos)} restauradas: " + ", ".join(
+                f"{destinos.count(d)} a «{d}»" for d in sorted(set(destinos))) + ".")
+            recargar()
     else:
-        st.info("No hay convocatorias descartadas.")
+        st.caption("No hay descartadas" + (" con esa búsqueda." if buscar_d else "."))
+    anul = [c for c in F.anuladas(A) if coincide(c.get("datos", {}))]
+    st.markdown(f"##### Anuladas (borradas del sistema) ({len(anul)})")
+    if anul:
+        tabla_a = pd.DataFrame([{"id": c["id"], "Convocatoria": c["datos"].get("Nombre de la Convocatoria"),
+                                 "Oferente": c["datos"].get("Nombre de la Fuente", ""), "Estaba en": c.get("estado", ""),
+                                 "Motivo": c.get("anulada", {}).get("motivo", ""),
+                                 "Quién": c.get("anulada", {}).get("usuario", ""),
+                                 "Cuándo": str(c.get("anulada", {}).get("fecha", ""))[:16]} for c in anul])
+        tabla_a = tabla_a.sort_values("Cuándo", ascending=False)
+        ev_a = st.dataframe(tabla_a.drop(columns="id"), hide_index=True, width="stretch", on_select="rerun",
+                            selection_mode="multi-row", key="tabla_anul", height=min(420, 38 + 35 * len(tabla_a)))
+        marc_a = [tabla_a.iloc[n]["id"] for n in (ev_a.selection.rows if ev_a and ev_a.selection else [])]
+        if PUEDE_REVISAR and st.button(f"Recuperar las marcadas ({len(marc_a)})", disabled=not marc_a,
+                                       icon=":material/restore_from_trash:", key="rec_anul"):
+            n = F.recuperar_anuladas(A, marc_a, YO["nombre"])
+            st.session_state["aviso"] = f"{n} convocatorias recuperadas: volvieron al estado que tenían."
+            recargar()
+        st.caption(f"Se guardan las últimas {F.MAX_PAPELERA} anuladas.")
+    else:
+        st.caption("No hay anuladas" + (" con esa búsqueda." if buscar_d else "."))
+    if not PUEDE_REVISAR:
+        st.caption("Restaurar o recuperar lo hace una persona con rol de revisión o administrador.")
 
 with t_cat:
     st.write("Catálogo único de actores. El **tipo** define si las convocatorias del actor son Oficiales "

@@ -73,7 +73,7 @@ if tareas.en_curso():
 
 
 def tarjeta(col, valor, texto, detalle, pagina, etiqueta, alerta=False):
-    with col.container(border=True):
+    with col.container(border=True, key=f"tarjeta_{pagina.split('/')[-1].split('.')[0]}_{etiqueta[:8]}"):
         color = "#B42318" if alerta and valor else "#0B2545"
         st.markdown(f"<div style='font-size:2.1rem;font-weight:700;color:{color};line-height:1.1'>{valor}</div>"
                     f"<div style='font-weight:600;margin-top:2px'>{texto}</div>"

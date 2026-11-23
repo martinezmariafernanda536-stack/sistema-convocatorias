@@ -66,10 +66,23 @@ Configuración*). **Cada cuánto:** cada dos semanas es suficiente.
 
 with st.expander("✍️ Completar a mano una convocatoria «Por completar»"):
     st.markdown("""
+**Desde Buscar convocatorias:** en el recuadro *Convocatorias por completar*, marca las que sí sirven y pulsa **Completar a
+mano las marcadas**. Pasan a *Revisar convocatorias* con el origen **«Para completar a mano»** (el filtro queda puesto), con
+todo lo que el sistema ya mapeó en el formulario editable y un aviso de lo que falta.
+
+**O desde Revisar convocatorias:**
 1. En **Revisar convocatorias**, abre la pestaña **Por completar**. La columna **Qué falta** dice qué le faltó.
 2. Marca la fila: se abre la misma ficha de revisión, con todo lo que el sistema ya mapeó.
 3. Abre la página oficial, completa lo que falta (o tradúcelo) y pulsa **Pasar a Por revisar**. También puedes aprobarla
    directamente o descartarla.
+""")
+
+with st.expander("♻️ Recuperar una convocatoria descartada o borrada por error"):
+    st.markdown("""
+En **Revisar convocatorias → Descartadas y anuladas** están las **descartadas** (en la revisión, en Por completar o
+retiradas de la base) y las **anuladas** (borradas del sistema, por ejemplo al vaciar la lista de Por completar). Busca la
+convocatoria, márcala y pulsa **Restaurar** o **Recuperar**: vuelve a donde estaba. Lo hace una persona con rol de revisión
+o administrador.
 """)
 
 with st.expander("✅ Revisar una convocatoria"):

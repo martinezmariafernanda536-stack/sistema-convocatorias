@@ -112,6 +112,7 @@ if len(ids) > 1:
                 with A.lote(f"Retiradas {len(ids)} convocatorias de la base"):
                     for item in [i for i in aprobadas if i["id"] in ids]:
                         item["estado"], item["observacion"] = "Descartada", motivo
+                        item.setdefault("meta", {})["estado_anterior"] = "Aprobada"
                         item["historial"].append({"fecha": ahora(), "usuario": YO["nombre"], "accion": "Retirada de la base", "detalle": motivo})
                         A.guardar_item(item)
                 st.session_state["aviso_base"] = f"{len(ids)} convocatorias retiradas de la base."
@@ -147,6 +148,7 @@ elif len(v):
                 else:
                     item["estado"] = "Descartada"
                     item["observacion"] = motivo
+                    item.setdefault("meta", {})["estado_anterior"] = "Aprobada"
                     item["historial"].append({"fecha": ahora(), "usuario": YO["nombre"], "accion": "Retirada de la base", "detalle": motivo})
                     A.guardar_item(item)
                     ui.recargar()

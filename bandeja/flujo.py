@@ -166,6 +166,8 @@ def descartar_varias(almacen, items, usuario, motivo):
 def descartar(almacen, item, usuario, motivo):
     if not motivo.strip():
         raise ErrorFlujo("Escribe el motivo del descarte")
+    if item.get("estado") != "Descartada":
+        item.setdefault("meta", {})["estado_anterior"] = item.get("estado", "Por revisar")  # para poder restaurarla
     item["estado"] = "Descartada"
     item["observacion"] = motivo
     _evento(item, usuario, "Descartada", motivo)
@@ -226,3 +228,76 @@ def registrar_actor_creado(almacen, nombre_actual, nombre_en_ciclope, usuario, t
         almacen.guardar_item(item)
         resultados.append((item["id"], item["estado"]))
     return actor, resultados
+
+
+# --- completar a mano, restaurar y recuperar anuladas ---------------------------------------
+PAPELERA = "anuladas.json"  # copias de las convocatorias borradas del sistema, para recuperarlas si fue un error
+MAX_PAPELERA = 3000
+
+
+def enviar_a_completar_a_mano(almacen, items, usuario):
+    """Las «Por completar» que una persona decide registrar: pasan a Revisar convocatorias con todo lo que ya mapeó el
+    sistema, para completar en el formulario lo que falte. Ya no las reintenta Gemini ni las mueve la limpieza."""
+    catalogo, base = almacen.catalogo(), almacen.base()
+    with almacen.lote(f"Enviadas a completar a mano: {len(items)}"):
+        for item in items:
+            _, hallazgos = evaluar(almacen, item["datos"], catalogo=catalogo, base=base)
+            item["meta"]["pendientes"] = [h.__dict__ for h in hallazgos if h.nivel in ("Error", "Alerta") and h.regla != "R07"]
+            item["meta"]["completar_a_mano"] = True
+            item["estado"] = "Por revisar"
+            _evento(item, usuario, "Enviada a completar a mano",
+                    "Falta: " + "; ".join(item["meta"].get("faltantes", []))[:300])
+            almacen.guardar_item(item)
+    return len(items)
+
+
+def restaurar(almacen, item, usuario):
+    """Una descartada (o retirada de la base) vuelve a donde estaba."""
+    destino = item.get("meta", {}).pop("estado_anterior", "")
+    if destino not in ("Por revisar", "Por completar", "Actor pendiente de crear", "Aprobada"):
+        retirada = any(e.get("accion") == "Retirada de la base" for e in item.get("historial", []))
+        destino = "Aprobada" if retirada else "Por revisar"
+    item["estado"] = destino
+    item["observacion"] = ""
+    _evento(item, usuario, "Restaurada", f"Volvió a «{destino}»")
+    almacen.guardar_item(item)
+    return destino
+
+
+def anular(almacen, items, usuario, motivo):
+    """Borra convocatorias del sistema guardando antes una copia en «Anuladas» para poder recuperarlas."""
+    import json
+    if not items:
+        return 0
+    papelera = json.loads(almacen.leer_archivo(PAPELERA) or b"[]")
+    for item in items:
+        copia = json.loads(json.dumps(item, ensure_ascii=False, default=str))
+        copia["anulada"] = {"fecha": ahora(), "usuario": usuario, "motivo": motivo}
+        papelera.append(copia)
+    papelera = papelera[-MAX_PAPELERA:]
+    almacen.guardar_archivo(PAPELERA, json.dumps(papelera, ensure_ascii=False).encode("utf-8"))
+    almacen.borrar_items([i["id"] for i in items], f"Anuladas {len(items)}: {motivo}"[:120])
+    return len(items)
+
+
+def anuladas(almacen):
+    import json
+    return json.loads(almacen.leer_archivo(PAPELERA) or b"[]")
+
+
+def recuperar_anuladas(almacen, ids, usuario):
+    """Devuelve al sistema las anuladas elegidas, en el estado que tenían."""
+    import json
+    papelera = anuladas(almacen)
+    volver = [c for c in papelera if c["id"] in set(ids)]
+    if not volver:
+        return 0
+    for c in volver:
+        info = c.pop("anulada", {})
+        c.setdefault("historial", []).append({"fecha": ahora(), "usuario": usuario, "accion": "Recuperada de anuladas",
+                                              "detalle": f"Se había anulado el {info.get('fecha', '')[:10]}: "
+                                                         f"{info.get('motivo', '')}"})
+    almacen.guardar_items(volver, f"Recuperadas {len(volver)} convocatorias anuladas")
+    resto = [c for c in papelera if c["id"] not in set(ids)]
+    almacen.guardar_archivo(PAPELERA, json.dumps(resto, ensure_ascii=False).encode("utf-8"))
+    return len(volver)

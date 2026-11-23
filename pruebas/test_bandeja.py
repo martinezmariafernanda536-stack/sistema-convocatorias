@@ -745,3 +745,30 @@ def test_actualizar_desde_airtable_sin_borrar_nada(almacen):
     assert "Monto actualizado en Airtable" in cambiada["datos"]["Observaciones sobre el financiamiento"]
     res2, _ = MG.actualizar(df2, almacen)                                           # cargarlo otra vez no cambia nada
     assert res2["nuevas"] == 0 and res2["actualizadas"] == 0 and len(almacen.items()) == total + 1
+
+
+def test_completar_a_mano_restaurar_y_recuperar_anuladas(almacen):
+    from bandeja import flujo as F
+    datos = {"Nombre de la Convocatoria": "Premio Antonio Nariño 2026", "Modalidad": "Premio",
+             "Cómo aplicar": "https://ejemplo.org/premio", "Nombre de la Fuente": "Embajada de Francia"}
+    F.ingresar(almacen, datos, "Mapeo automático · OFE-1", "Sistema", {"faltantes": ["Fecha Límite de Aplicación: vacía"]},
+               estado="Por completar")
+    F.ingresar(almacen, datos | {"Nombre de la Convocatoria": "Otra"}, "Mapeo automático · OFE-1", "Sistema",
+               {"faltantes": ["Requisitos"]}, estado="Por completar")
+    a, b = almacen.items("Por completar")
+    # «Completar a mano»: pasa a Por revisar con todo lo mapeado y marcada para completar
+    F.enviar_a_completar_a_mano(almacen, [a], "Natalia")
+    (r,) = almacen.items("Por revisar")
+    assert r["datos"]["Cómo aplicar"] == "https://ejemplo.org/premio" and r["meta"]["completar_a_mano"]
+    assert F.tocada_por_persona(r)                       # la limpieza automática ya no la mueve
+    # descartar y restaurar: vuelve a donde estaba
+    F.descartar(almacen, b, "Natalia", "No sirve")
+    assert F.restaurar(almacen, almacen.items("Descartada")[0], "Natalia") == "Por completar"
+    # anular (borrar) y recuperar
+    b = almacen.items("Por completar")[0]
+    F.anular(almacen, [b], "Natalia", "Se vació la lista")
+    assert almacen.items("Por completar") == [] and len(F.anuladas(almacen)) == 1
+    assert F.recuperar_anuladas(almacen, [b["id"]], "Natalia") == 1
+    assert len(almacen.items("Por completar")) == 1 and F.anuladas(almacen) == []
+    rec = almacen.items("Por completar")[0]
+    assert rec["historial"][-1]["accion"] == "Recuperada de anuladas"

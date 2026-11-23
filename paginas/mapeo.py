@@ -155,7 +155,7 @@ def revisar_version():
     faltan = []
     try:
         import mapeo as programa
-        if getattr(programa, "VERSION", "") < "2026-11-22d":
+        if getattr(programa, "VERSION", "") < "2026-11-22e":
             faltan.append("mapeo.py")
         if importlib.util.find_spec("motor.radar") is None:
             faltan.append("motor/radar.py")
@@ -274,6 +274,10 @@ from bandeja import flujo as F  # noqa: E402
 from calidad import entrada as E  # noqa: E402
 
 por_completar = A.items(E.ESTADO)
+if st.session_state.get("aviso_pc"):
+    with st.container(border=True):
+        st.success(st.session_state.pop("aviso_pc"))
+        st.page_link("paginas/bandeja.py", label="Ir a completarlas en Revisar convocatorias", icon=":material/arrow_forward:")
 if por_completar:
     with st.container(border=True):
         st.markdown(f"#### {len(por_completar)} convocatorias por completar")
@@ -290,7 +294,7 @@ if por_completar:
                          disabled=OCUPADO):
                 tocadas = [i for i in por_completar if F.tocada_por_persona(i)]
                 borrar = [i for i in por_completar if not F.tocada_por_persona(i)]
-                A.borrar_items([i["id"] for i in borrar], f"Vaciar por completar: {len(borrar)}")
+                F.anular(A, borrar, YO["nombre"], "Se vació la lista de por completar")
                 hist = A.leer_archivo("historial_mapeo.json")
                 if hist:
                     h = json.loads(hist)
@@ -313,6 +317,17 @@ if por_completar:
                                          "Convocatoria": st.column_config.TextColumn(width="large"),
                                          "Qué le falta": st.column_config.TextColumn(width="large")})
         marcadas = [tabla_pc.iloc[n]["id"] for n in (ev.selection.rows if ev and ev.selection else [])]
+        elegidas_pc = [i for i in por_completar if i["id"] in marcadas]
+        if st.button(f"Completar a mano las marcadas ({len(marcadas)})", type="primary", disabled=not marcadas,
+                     icon=":material/edit_note:",
+                     help="Para las que sí sirven: pasan a Revisar convocatorias con todo lo que ya mapeó el sistema, y "
+                          "allí se completa en el formulario lo que falte."):
+            n = F.enviar_a_completar_a_mano(A, elegidas_pc, YO["nombre"])
+            st.session_state["rev_origen"] = ["Para completar a mano"]
+            st.session_state["aviso_pc"] = (f"{n} enviadas a Revisar convocatorias → pestaña Por revisar, con el origen "
+                                            "«Para completar a mano» (el filtro ya queda puesto). Allí está todo lo que "
+                                            "mapeó el sistema, listo para completar en el formulario.")
+            st.rerun()
         p1, p2, p3 = st.columns([1.2, 1.3, 2])
         if p1.button("Reintentar ahora", disabled=OCUPADO or not clave, icon=":material/refresh:",
                      help="Gemini vuelve a leer la página de cada una. Las que queden completas pasan a la bandeja."):
@@ -322,8 +337,8 @@ if por_completar:
             F.descartar_varias(A, [i for i in por_completar if i["id"] in marcadas], YO["nombre"],
                                "No se pudo completar con la información de la página")
             st.rerun()
-        p3.caption("Marca filas para descartarlas. Si una sirve y la página no trae la información, puedes registrarla "
-                   "a mano en Revisar convocatorias → Registrar convocatoria.")
+        p3.caption("Marca las filas: **Completar a mano** si sirven (llegan a Revisar convocatorias con lo que ya se mapeó), "
+                   "o **Descartar** si no. Lo descartado se puede restaurar en Revisar convocatorias → Descartadas y anuladas.")
 
 # --- resultado de la última búsqueda ------------------------------------------------
 ult = A.leer_archivo("ultimo_mapear.json")
